@@ -1,0 +1,91 @@
+{
+  "api_base_url": {
+    "description": "媒体接口地址",
+    "type": "string",
+    "default": "",
+    "hint": "例如 https://你的域名/api/media.php。中文域名会自动转 punycode，填中文或 xn-- 形式都行。"
+  },
+  "api_key": {
+    "description": "API 密钥",
+    "type": "string",
+    "default": "",
+    "hint": "pk_ 开头、共 51 字符。在 用户中心 → 视频 API → 新建密钥 获取，明文只显示一次。"
+  },
+  "api_key_header": {
+    "description": "密钥请求头名称",
+    "type": "string",
+    "default": "X-API-Key",
+    "hint": "默认 X-API-Key，不依赖 nginx 透传 Authorization。若改用 Authorization，请把下面的前缀填成 'Bearer '。"
+  },
+  "api_key_prefix": {
+    "description": "密钥前缀",
+    "type": "string",
+    "default": "",
+    "hint": "使用 Authorization 时填 'Bearer '（含空格），使用 X-API-Key 时留空。"
+  },
+  "keyword": {
+    "description": "检索关键词",
+    "type": "string",
+    "default": "有兽焉",
+    "hint": "作为 action=list 的 q 参数，也用于日志识别。留空则检索全部视频（较慢）。"
+  },
+  "play_ttl": {
+    "description": "播放直链有效期（秒）",
+    "type": "int",
+    "default": 7200,
+    "hint": "接口允许 60~86400。直链过期后需要重新发指令换取。"
+  },
+  "page_size": {
+    "description": "列表每页数量",
+    "type": "int",
+    "default": 100,
+    "hint": "接口上限 100。"
+  },
+  "max_pages": {
+    "description": "最多翻页数",
+    "type": "int",
+    "default": 5,
+    "hint": "100 × 5 = 最多检索 500 个文件，够用就别调大。"
+  },
+  "cache_ttl": {
+    "description": "文件列表缓存（秒）",
+    "type": "int",
+    "default": 300,
+    "hint": "缓存内不会重复请求 list；查不到话数时会自动强制刷新一次。"
+  },
+  "max_episode": {
+    "description": "最大话数",
+    "type": "int",
+    "default": 0,
+    "hint": "0 表示不限制；填了会直接拦截超范围的话数。"
+  },
+  "max_range": {
+    "description": "单次最多查询话数",
+    "type": "int",
+    "default": 3,
+    "hint": "支持 /看 有兽焉第1-5话 这类范围查询，超过该数量会被拒绝。"
+  },
+  "max_send_size_mb": {
+    "description": "自动上传视频的体积上限（MB）",
+    "type": "int",
+    "default": 100,
+    "hint": "超过该体积只回复直链，避免大文件上传失败。填 0 表示不限制。"
+  },
+  "link_only": {
+    "description": "只发链接",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后不再尝试以视频消息发送。平台对视频消息支持不佳时可打开。"
+  },
+  "timeout": {
+    "description": "请求超时（秒）",
+    "type": "int",
+    "default": 15
+  },
+  "extra_headers": {
+    "description": "附加请求头",
+    "type": "dict",
+    "default": {},
+    "hint": "键值对，例如 {\"Referer\": \"https://your-domain.com\"}"
+  }
+}
