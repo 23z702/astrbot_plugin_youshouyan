@@ -785,6 +785,40 @@ class MediaAPI:
     def purge_url(self, video_id: int) -> None:
         self._url_cache.pop((self.source, video_id), None)
 
+    # ---------------------------------------------------------------- 下载
+
+    async def download(self, url: str, dest: str, timeout: int = 180) -> str:
+        """把播放直链下载到本地文件（群文件上传要用本地路径）。
+
+        直链本身支持 Range，但没有密钥头也能下（签名在 URL 里）。
+        """
+        if not url:
+            raise ApiError("没有可下载的地址")
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=max(30, timeout))
+            ) as session:
+                async with session.get(
+                    url, headers={"User-Agent": USER_AGENT}
+                ) as response:
+                    if response.status >= 400:
+                        raise ApiError(f"下载失败（HTTP {response.status}）")
+                    total = 0
+                    with open(dest, "wb") as handle:
+                        async for chunk in response.content.iter_chunked(1 << 20):
+                            handle.write(chunk)
+                            total += len(chunk)
+        except asyncio.TimeoutError as exc:
+            raise ApiError("下载超时了，文件可能太大或网速太慢") from exc
+        except aiohttp.ClientError as exc:
+            raise ApiError(f"下载失败：{exc}") from exc
+        except OSError as exc:
+            raise ApiError(f"写临时文件失败：{exc}") from exc
+
+        if total <= 0:
+            raise ApiError("下载到的内容是空的")
+        return dest
+
 
 def _pick_best(
     videos: List[Dict[str, Any]], episode: int

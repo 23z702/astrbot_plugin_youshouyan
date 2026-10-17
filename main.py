@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import shutil
+import tempfile
 import time
 from typing import AsyncGenerator, List, Optional
 
@@ -33,11 +36,13 @@ except ImportError:  # 某些加载器以单文件方式导入
     from parser import ParseError, parse_request, strip_command  # type: ignore
 
 PLUGIN_NAME = "astrbot_plugin_youshouyan"
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 
 # QQ 群视频走 highway 上传，实测超过约 50MB 会在上传中途失败（retcode 1200 / 102902），
 # 所以默认阈值取 50MB；真发失败时还会自动收紧并记住。
 _DEFAULT_MAX_SEND_MB = 50
+
+_UNSAFE_NAME = re.compile(r'[\\/:*?"<>|\r\n\t]')
 
 HELP_TEXT = (
     "🐾 有兽焉追番\n"
@@ -84,6 +89,13 @@ class YoushouyanPlugin(Star):
         try:
             value = self.config.get(key, default)
             return default if value is None else int(value)
+        except Exception:  # noqa: BLE001
+            return default
+
+    def _str_conf(self, key: str, default: str) -> str:
+        try:
+            value = self.config.get(key, default)
+            return default if value is None else str(value).strip()
         except Exception:  # noqa: BLE001
             return default
 
@@ -165,6 +177,50 @@ class YoushouyanPlugin(Star):
             return False
         return True
 
+    async def _try_group_file(
+        self, event: AstrMessageEvent, result: EpisodeResult
+    ) -> bool:
+        """把视频传到群文件（QQ 群视频消息卡 ~50MB，群文件上限大得多）。
+
+        流程：直链 → 下载到本地临时文件 → upload_group_file → 删掉临时文件。
+        任何一步失败都返回 False，让调用方继续降级。
+        """
+        bot = getattr(event, "bot", None)
+        getter = getattr(event, "get_group_id", None)
+        if bot is None or not callable(getter):
+            return False
+        try:
+            group_id = getter()
+        except Exception:  # noqa: BLE001
+            group_id = None
+        if not group_id:
+            return False  # 私聊没有群文件
+
+        name = _UNSAFE_NAME.sub("_", result.title or f"第{result.episode}话")[:80]
+        if not os.path.splitext(name)[1]:
+            name += ".mp4"
+
+        workdir = tempfile.mkdtemp(prefix="ysy_upload_")
+        path = os.path.join(workdir, name)
+        try:
+            timeout = self._int_conf("download_timeout", 180)
+            await self.api.download(result.content, path, timeout=timeout)
+            size_mb = os.path.getsize(path) / 1024 / 1024
+            logger.info(f"[有兽焉] 已下载 {size_mb:.1f} MB，上传到群文件…")
+            await bot.call_action(
+                "upload_group_file",
+                group_id=str(group_id),
+                file=path,
+                name=name,
+            )
+            logger.info(f"[有兽焉] 群文件上传成功：{name}")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[有兽焉] 群文件上传失败：{exc}")
+            return False
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
     @staticmethod
     def _text_reply(result: EpisodeResult, note: str = "") -> str:
         lines = [result.headline()]
@@ -224,6 +280,8 @@ class YoushouyanPlugin(Star):
 
         link_only = self._bool_conf("link_only", False)
         max_mb = max(0, self._int_conf("max_send_size_mb", _DEFAULT_MAX_SEND_MB))
+        mode = self._str_conf("upload_mode", "auto").lower()
+        allow_file = mode in ("auto", "group_file")
 
         for index, episode in enumerate(episodes):
             if index:
@@ -243,15 +301,32 @@ class YoushouyanPlugin(Star):
             budget = self._upload_budget_mb(max_mb)
             too_big = result.size_bytes > 0 and result.size_bytes > budget * 1024 * 1024
 
-            note = ""
-            if not link_only and not too_big and Video is not None:
+            # 1) 先按老办法直接发视频消息（小文件最省事）
+            if (
+                mode in ("auto", "video")
+                and not link_only
+                and not too_big
+                and Video is not None
+            ):
                 if await self._try_send_video(event, result):
                     continue
+
+            # 2) 视频消息发不出去（或文件太大）→ 传到群文件，QQ 内可直接播放
+            if allow_file and not link_only:
+                if await self._try_group_file(event, result):
+                    yield event.plain_result(
+                        f"📁 第{episode}话已上传到群文件：{result.title or ''}\n"
+                        f"{result.headline()}\n"
+                        "在群文件里点开就能看，不受视频消息 50MB 的限制"
+                    )
+                    continue
+
+            # 3) 兜底：发直链
+            note = ""
+            if too_big:
+                note = f"📦 文件超过 {budget:.0f} MB，已改为发送直链，点开即可播放"
+            elif not link_only:
                 note = "📦 视频没能直接发出（多半是平台上传限制），已改为发送直链"
-            elif too_big:
-                note = (
-                    f"📦 文件超过 {budget:.0f} MB，已改为发送直链，点开即可播放"
-                )
 
             yield event.plain_result(self._text_reply(result, note))
 
@@ -306,6 +381,15 @@ class YoushouyanPlugin(Star):
         if self._upload_limit_mb is not None:
             budget_text += "（上传失败后已自动收紧）"
         lines.append(f"· 直发上限：{budget_text}")
+
+        mode = self._str_conf("upload_mode", "auto")
+        mode_text = {
+            "auto": "自动（先视频消息，不行再传群文件，最后发直链）",
+            "video": "只发视频消息",
+            "group_file": "只传群文件",
+            "link": "只发直链",
+        }.get(mode, mode)
+        lines.append(f"· 发送方式：{mode_text}")
 
         passwords = self.api.folder_passwords
         if passwords:

@@ -169,6 +169,15 @@ class _Handler(BaseHTTPRequestHandler):
             {**{k: v[0] for k, v in query.items()}, "_path": parsed.path}
         )
 
+        if action == "preview":  # 直链本体：给一段可下载的字节流
+            body = b"\x00" * 65536
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if parsed.path == "/api/public.php":
             self._public(action, query)
             return
@@ -304,13 +313,30 @@ def _serve() -> tuple:
 
 
 # --------------------------------------------------------------- 假事件
+class FakeBot:
+    def __init__(self, ok: bool = True):
+        self.ok = ok
+        self.calls: list = []
+
+    async def call_action(self, action, **kwargs):
+        self.calls.append((action, kwargs))
+        if not self.ok:
+            raise RuntimeError("协议端不支持 upload_group_file")
+        return {"file_id": "x"}
+
+
 class FakeEvent:
     """fail_upload=True 时模拟 QQ highway 上传中途失败。"""
 
-    def __init__(self, text: str, fail_upload: bool = False):
+    def __init__(self, text: str, fail_upload: bool = False, bot=None, group_id="10086"):
         self.message_str = text
         self.sent: list = []
         self.fail_upload = fail_upload
+        self.bot = bot
+        self._group_id = group_id
+
+    def get_group_id(self):
+        return self._group_id
 
     def plain_result(self, text):
         item = ("text", text)
@@ -523,6 +549,48 @@ async def main() -> int:
         print("  ✓ 上限内的小文件照旧直发，不受影响")
     else:
         print(f"  ✗ 小文件也被误伤：{_show(event)[:60]}")
+        failed += 1
+
+    print("\n== 群文件上传（超过 50MB 也能真的传上去）==")
+    bot = FakeBot(ok=True)
+    uploader2 = plugin_main.YoushouyanPlugin(
+        context=None,
+        config={**config, "source": "public", "folder_password": "dir-pass",
+                "max_send_size_mb": 50},
+    )
+    event = FakeEvent("/看 有兽焉第13话", fail_upload=True, bot=bot)  # 77.65 MB
+    async for _ in uploader2.watch(event):
+        pass
+    out = _show(event)
+    if "群文件" in out and any(a == "upload_group_file" for a, _ in bot.calls):
+        print(f"  ✓ 视频消息失败后改传群文件：{out[:60]}")
+    else:
+        print(f"  ✗ 没有走群文件：{out[:80]} calls={bot.calls}")
+        failed += 1
+
+    bad_bot = FakeBot(ok=False)
+    event = FakeEvent("/看 有兽焉第13话", fail_upload=True, bot=bad_bot)
+    async for _ in uploader2.watch(event):
+        pass
+    out = _show(event)
+    if "🔗" in out and "群文件" not in out:
+        print("  ✓ 协议端不支持群文件时，退回发直链")
+    else:
+        print(f"  ✗ 群文件失败后没降级：{out[:80]}")
+        failed += 1
+
+    only_link = plugin_main.YoushouyanPlugin(
+        context=None,
+        config={**config, "source": "public", "folder_password": "dir-pass",
+                "upload_mode": "link"},
+    )
+    event = FakeEvent("/看 有兽焉第13话", bot=FakeBot(ok=True))
+    async for _ in only_link.watch(event):
+        pass
+    if "群文件" not in _show(event) and "🔗" in _show(event):
+        print("  ✓ upload_mode=link 时不尝试上传，只发直链")
+    else:
+        print(f"  ✗ upload_mode=link 仍在上传：{_show(event)[:80]}")
         failed += 1
 
     print("\n== 异常分支 ==")

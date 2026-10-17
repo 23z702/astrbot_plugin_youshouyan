@@ -84,6 +84,19 @@
     "default": 50,
     "hint": "超过该体积只回复直链。QQ 群视频走 highway 上传，实测 50MB 以上常在半途失败（retcode 1200/102902），默认取 50 比较稳；填 0 表示不限制。即使没超上限，上传失败也会自动改发直链。"
   },
+  "upload_mode": {
+    "description": "发送方式",
+    "type": "string",
+    "default": "auto",
+    "options": ["auto", "video", "group_file", "link"],
+    "hint": "auto = 小文件发视频消息，发不出去或文件太大就传到群文件（上限大得多），都不行才发直链；group_file = 一律传群文件；video = 只发视频消息；link = 只发直链。群文件用的是 OneBot 的 upload_group_file，需要协议端支持（NapCat / LLOneBot 都支持）。"
+  },
+  "download_timeout": {
+    "description": "群文件上传前的下载超时（秒）",
+    "type": "int",
+    "default": 180,
+    "hint": "传群文件要先从网盘把视频拉到本地临时目录，大文件按需调大。"
+  },
   "link_only": {
     "description": "只发链接",
     "type": "bool",

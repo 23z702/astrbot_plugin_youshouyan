@@ -87,22 +87,29 @@ git clone https://github.com/23z702/astrbot_plugin_youshouyan.git
 
 同一话命中多个文件时，取匹配可信度最高的；同分再取 `create_time` 最新的。
 
-### 发送策略
+### 发送策略（三级降级）
 
-- 文件 ≤ `max_send_size_mb`（默认 **50MB**）：发视频消息（文本+视频一条链）；
-- 超过上限或开启 `link_only`：发文本，含文件名、大小和直链，并说明为什么没发视频；
-- 视频消息上传失败会**自动补发直链文本**，不会哑掉。
+1. **视频消息**：文件 ≤ `max_send_size_mb`（默认 50MB）时直接发，群里点开即播；
+2. **群文件**：视频消息发不出去（或文件太大）时，先把视频拉到本地临时目录，
+   再用 OneBot 的 `upload_group_file` 传到群文件 —— 上限大得多，几百 MB 也 OK；
+3. **直链**：以上都失败才发文本直链。
 
 为什么要卡 50MB：QQ 群视频走 highway 上传，实测 77MB 的文件会在传到 ~52MB 时被拒
 （`retcode=1200 / HTTP Upload failed with code 102902`），此时插件只会在日志里留一条 ERRO，
-用户那边什么都收不到。现在插件自己 `await event.send()` 捕获这个异常：
+用户那边什么都收不到。现在插件自己 `await event.send()` 捕获这个异常，并顺手：
 
-1. 立刻补发一条「直链 + 大小 + 有效期」的文本；
-2. 把本次学到的体积上限记下来（失败体积 × 0.6，最低 10MB），
-   之后更大的文件直接走链接，**不再每次都白等一次几十秒的上传**；
-3. `/有兽焉自检` 会显示当前的「直发上限」，若已自动收紧会标出来。
+- 把本次学到的体积上限记下来（失败体积 × 0.6，最低 10MB），
+  之后更大的文件跳过第 1 步，**不再每次都白等一次几十秒的上传**；
+- `/有兽焉自检` 会显示当前的「直发上限」和「发送方式」。
 
 小文件不受影响：只有真正上传失败才会收紧上限，未失败过就按 `max_send_size_mb` 走。
+
+群文件的几个前提：必须是**群聊**（私聊没有群文件）、协议端要实现 `upload_group_file`
+（NapCat / LLOneBot 都支持，不支持时会自动退回发直链）、群容量要够。
+临时文件下载到系统 temp 目录，传完即删。
+
+`upload_mode` 可以固定行为：`auto`（默认，三级降级）/ `video`（只发视频消息）/
+`group_file`（一律传群文件）/ `link`（只发直链）。
 
 ## 其余配置
 
@@ -115,8 +122,10 @@ git clone https://github.com/23z702/astrbot_plugin_youshouyan.git
 | `page_size` / `max_pages` | 100 / 5 | 最多检索 500 个文件 |
 | `max_episode` | 0 | 话数上限，0 不限；填了就本地拦截，不浪费请求 |
 | `max_range` | 3 | 一次最多查几话 |
-| `max_send_size_mb` | 50 | 超过就只发直链；0 = 不限制（不建议） |
-| `link_only` | false | 一律只发直链，不尝试上传视频 |
+| `max_send_size_mb` | 50 | 超过就不发视频消息（改走群文件/直链）；0 = 不限制（不建议） |
+| `upload_mode` | auto | `auto` / `video` / `group_file` / `link` |
+| `download_timeout` | 180 | 传群文件前从网盘下载的超时（秒） |
+| `link_only` | false | 一律只发直链，不尝试上传 |
 | `timeout` | 15 | 单次请求超时 |
 | `extra_headers` | `{}` | 附加请求头（如 Referer） |
 
@@ -150,7 +159,7 @@ python tests/smoke_test.py
 ## 结构
 
 ```
-main.py              指令处理、消息发送
+main.py              指令处理、消息发送（视频 → 群文件 → 直链三级降级）
 parser.py            指令解析（中文数字、范围）
 api.py               接口请求、文件名匹配、缓存
 tests/smoke_test.py  离线冒烟测试
