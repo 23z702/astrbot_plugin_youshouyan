@@ -4,10 +4,6 @@ AstrBot 插件：发送 `/看 有兽焉第12话`，从站点媒体接口取回�
 
 数据来源：`/api/media.php`（`list` 检索 + `video` 换取限时直链），鉴权用 `X-API-Key`。
 
-##如何获取秘钥
-注册pan.辟邪与天禄.icu
-默认https://pan.辟邪与天禄.icu/api/media.php
-
 ## 支持的说法
 
 | 输入 | 结果 |
@@ -44,14 +40,38 @@ git clone https://github.com/23z702/astrbot_plugin_youshouyan.git
 
 ⚠️ 密钥等于「以你的身份读文件」：只填在 AstrBot 配置里，不要进前端、公开仓库或截图。
 
+## 视频来源
+
+两个来源用的不是同一个接口，插件会自动分辨：
+
+| `source` | 走哪个接口 | 说明 |
+| --- | --- | --- |
+| `public`（默认） | `/api/public.php` | 公共网盘。接口会从根目录开始遍历目录树，带密码的目录用配置的密码进入 |
+| `own` | `/api/media.php` | 只读自己的网盘，`action=list` + `action=video` 换临时直链 |
+
+**为什么公共网盘不用 `media.php`**：`media.php?source=public` 只列公开部分，受密码保护的目录**完全不返回**，带不带密码都一样。而公共网盘的内容往往全在带密码的目录里，所以插件改走站点前端用的 `public.php`：先列根目录，再用密码逐层进入子目录，取到文件后拼出播放地址。
+
+**受密码保护的目录**：`folder_password` 填目录密码即可，一行一个（也支持逗号、竖线分隔），插件会依次试，能打开哪个就用哪个，并记住每个文件对应哪条密码。公共网盘的播放地址优先用列表返回的签名（`exp` + `sig`，默认约 2 小时），签名过期或缺失时才退回「带目录密码」的地址——两者都支持 HTTP Range，能拖进度条。
+
+`/有兽焉自检` 会分别列出「我的网盘」和「公共网盘」的视频数，并标出当前用的是哪个——内容在哪边一眼就能看出来。
+
+它还会顺便读一次公共网盘的目录结构（`api/public.php?action=list&folder_id=0`，不需密钥），带 🔒 的目录就是设了密码的。如果公共网盘显示 0 个视频、而目录列表里有 🔒，那就是密码没填或填错了。
+
 ## 工作流程
 
 ```
-/看 有兽焉第12话
-  ├─ GET ?action=list&q=有兽焉&page=1&page_size=100   ← 结果缓存 cache_ttl 秒，自动翻页
+/看 有兽焉第12话（source=public）
+  ├─ GET /api/public.php?action=list&folder_id=0          ← 根目录，拿子目录
+  ├─ GET /api/public.php?action=list&folder_id=1&folder_password=xxx
+  │     ← 密码错会返回 code 2，换下一个密码再试；结果缓存 cache_ttl 秒
   ├─ 用文件名匹配第 12 话，多个命中取最像的、再取上传时间最新的
-  └─ GET ?action=video&id=123&ttl=7200                ← 直链在有效期内复用
-       └─ 发视频消息（超过 max_send_size_mb 则改为发直链文本）
+  └─ 拼播放地址 /api/public.php?action=preview&id=43&exp=..&sig=..
+        ← 支持 Range，可直接丢给播放器
+
+/看 有兽焉第12话（source=own）
+  ├─ GET /api/media.php?action=list&q=有兽焉&page=1&page_size=100
+  └─ GET /api/media.php?action=video&id=123&ttl=7200
+        └─ 发视频消息（超过 max_send_size_mb 则改为发直链文本）
 ```
 
 ### 文件名匹配规则
@@ -69,19 +89,34 @@ git clone https://github.com/23z702/astrbot_plugin_youshouyan.git
 
 ### 发送策略
 
-- 文件 ≤ `max_send_size_mb`（默认 100MB）：发视频消息（文本+视频一条链）；
+- 文件 ≤ `max_send_size_mb`（默认 **50MB**）：发视频消息（文本+视频一条链）；
 - 超过上限或开启 `link_only`：发文本，含文件名、大小和直链，并说明为什么没发视频；
-- 视频消息发送失败会自动降级为直链文本，不会哑掉。
+- 视频消息上传失败会**自动补发直链文本**，不会哑掉。
+
+为什么要卡 50MB：QQ 群视频走 highway 上传，实测 77MB 的文件会在传到 ~52MB 时被拒
+（`retcode=1200 / HTTP Upload failed with code 102902`），此时插件只会在日志里留一条 ERRO，
+用户那边什么都收不到。现在插件自己 `await event.send()` 捕获这个异常：
+
+1. 立刻补发一条「直链 + 大小 + 有效期」的文本；
+2. 把本次学到的体积上限记下来（失败体积 × 0.6，最低 10MB），
+   之后更大的文件直接走链接，**不再每次都白等一次几十秒的上传**；
+3. `/有兽焉自检` 会显示当前的「直发上限」，若已自动收紧会标出来。
+
+小文件不受影响：只有真正上传失败才会收紧上限，未失败过就按 `max_send_size_mb` 走。
 
 ## 其余配置
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
+| `source` | public | 视频来源：`public` 公共网盘 / `own` 自己的网盘 |
+| `folder_password` | 空 | 受密码保护的公共目录密码，多个用换行/逗号分隔 |
 | `play_ttl` | 7200 | 直链有效期（接口允许 60~86400） |
 | `cache_ttl` | 300 | 文件列表缓存；查不到话数时会自动强制刷新一次 |
 | `page_size` / `max_pages` | 100 / 5 | 最多检索 500 个文件 |
 | `max_episode` | 0 | 话数上限，0 不限；填了就本地拦截，不浪费请求 |
 | `max_range` | 3 | 一次最多查几话 |
+| `max_send_size_mb` | 50 | 超过就只发直链；0 = 不限制（不建议） |
+| `link_only` | false | 一律只发直链，不尝试上传视频 |
 | `timeout` | 15 | 单次请求超时 |
 | `extra_headers` | `{}` | 附加请求头（如 Referer） |
 
@@ -110,7 +145,7 @@ git clone https://github.com/23z702/astrbot_plugin_youshouyan.git
 python tests/smoke_test.py
 ```
 
-用假 astrbot 模块 + 本地模拟 `/api/media.php`，覆盖 7 个指令场景、文件名匹配、缓存命中、401、未配置、话数上限。需要 `aiohttp`。
+用假 astrbot 模块 + 本地模拟 `/api/media.php` 和 `/api/public.php`，覆盖指令解析、文件名匹配、缓存命中、`source`/`folder_password` 参数下发、受密码目录、上传失败降级、401、未配置、话数上限。需要 `aiohttp`。
 
 ## 结构
 

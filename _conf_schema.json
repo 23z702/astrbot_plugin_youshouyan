@@ -29,6 +29,19 @@
     "default": "有兽焉",
     "hint": "作为 action=list 的 q 参数，也用于日志识别。留空则检索全部视频（较慢）。"
   },
+  "source": {
+    "description": "视频来源",
+    "type": "string",
+    "default": "public",
+    "options": ["public", "own"],
+    "hint": "public = 公共网盘，own = 自己的网盘。/有兽焉自检 会同时显示两边的视频数量。"
+  },
+  "folder_password": {
+    "description": "公共目录密码",
+    "type": "string",
+    "default": "",
+    "hint": "受密码保护的公共目录密码。多个目录密码可用换行或逗号分隔，插件会逐个尝试并合并结果；受保护的目录不会出现在列表里，必须提供密码才能取到直链。"
+  },
   "play_ttl": {
     "description": "播放直链有效期（秒）",
     "type": "int",
@@ -68,8 +81,8 @@
   "max_send_size_mb": {
     "description": "自动上传视频的体积上限（MB）",
     "type": "int",
-    "default": 100,
-    "hint": "超过该体积只回复直链，避免大文件上传失败。填 0 表示不限制。"
+    "default": 50,
+    "hint": "超过该体积只回复直链。QQ 群视频走 highway 上传，实测 50MB 以上常在半途失败（retcode 1200/102902），默认取 50 比较稳；填 0 表示不限制。即使没超上限，上传失败也会自动改发直链。"
   },
   "link_only": {
     "description": "只发链接",

@@ -33,7 +33,11 @@ except ImportError:  # 某些加载器以单文件方式导入
     from parser import ParseError, parse_request, strip_command  # type: ignore
 
 PLUGIN_NAME = "astrbot_plugin_youshouyan"
-VERSION = "1.1.0"
+VERSION = "1.4.1"
+
+# QQ 群视频走 highway 上传，实测超过约 50MB 会在上传中途失败（retcode 1200 / 102902），
+# 所以默认阈值取 50MB；真发失败时还会自动收紧并记住。
+_DEFAULT_MAX_SEND_MB = 50
 
 HELP_TEXT = (
     "🐾 有兽焉追番\n"
@@ -67,6 +71,8 @@ class YoushouyanPlugin(Star):
         super().__init__(context)
         self.config = config if config is not None else {}
         self.api = MediaAPI(self.config)
+        # 运行期学到的「实际能直发」的上限（MB），None 表示还没失败过
+        self._upload_limit_mb: Optional[float] = None
         logger.info(
             f"[有兽焉] 插件已加载（v{VERSION}），接口"
             f"{'已' if self.api.configured else '未'}配置"
@@ -118,6 +124,46 @@ class YoushouyanPlugin(Star):
         if component is None:
             return None
         return [Plain(result.headline()), component]
+
+    # ------------------------------------------------------------ 发送
+
+    def _upload_budget_mb(self, max_mb: int) -> float:
+        """当前允许直发视频的大小上限（MB）。"""
+        limit = float(max_mb) if max_mb > 0 else float("inf")
+        if self._upload_limit_mb is not None:
+            limit = min(limit, self._upload_limit_mb)
+        return limit
+
+    async def _try_send_video(self, event: AstrMessageEvent, result: EpisodeResult) -> bool:
+        """尝试直接发送视频。成功返回 True；失败返回 False 由调用方降级发链接。
+
+        注意必须在这里自己 await event.send()，异常才抓得到——
+        用 yield 交给框架发的话，上传失败只会在日志里留一条 ERRO，
+        用户那边什么都不收到。
+        """
+        chain = self._video_chain(result)
+        if not chain:
+            return False
+        sender = getattr(event, "send", None)
+        if not callable(sender):  # 太老的版本没有 send，退回原行为
+            return False
+        try:
+            await sender(event.chain_result(chain))
+        except Exception as exc:  # noqa: BLE001
+            size_mb = result.size_bytes / 1024 / 1024 if result.size_bytes else 0
+            logger.warning(
+                f"[有兽焉] 视频上传失败（{size_mb:.1f} MB）：{exc}"
+            )
+            # 记住一个更保守的上限，下次同类文件直接走链接，别再白等一次上传
+            learned = max(10.0, size_mb * 0.6)
+            if self._upload_limit_mb is None or learned < self._upload_limit_mb:
+                self._upload_limit_mb = learned
+                logger.info(
+                    f"[有兽焉] 已把直发上限收紧到 {learned:.0f} MB，"
+                    "更大的文件将改为发送直链"
+                )
+            return False
+        return True
 
     @staticmethod
     def _text_reply(result: EpisodeResult, note: str = "") -> str:
@@ -177,7 +223,7 @@ class YoushouyanPlugin(Star):
             return
 
         link_only = self._bool_conf("link_only", False)
-        max_mb = self._int_conf("max_send_size_mb", 100)
+        max_mb = max(0, self._int_conf("max_send_size_mb", _DEFAULT_MAX_SEND_MB))
 
         for index, episode in enumerate(episodes):
             if index:
@@ -194,17 +240,19 @@ class YoushouyanPlugin(Star):
                 yield event.plain_result(f"❌ 第{episode}话出错了：{exc}")
                 continue
 
-            too_big = max_mb > 0 and result.size_bytes > max_mb * 1024 * 1024
-            if not link_only and not too_big:
-                chain = self._video_chain(result)
-                if chain:
-                    try:
-                        yield event.chain_result(chain)
-                        continue
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(f"[有兽焉] 视频消息发送失败，降级为链接：{exc}")
+            budget = self._upload_budget_mb(max_mb)
+            too_big = result.size_bytes > 0 and result.size_bytes > budget * 1024 * 1024
 
-            note = f"📦 文件超过 {max_mb} MB，已改为发送直链，点开即可播放" if too_big else ""
+            note = ""
+            if not link_only and not too_big and Video is not None:
+                if await self._try_send_video(event, result):
+                    continue
+                note = "📦 视频没能直接发出（多半是平台上传限制），已改为发送直链"
+            elif too_big:
+                note = (
+                    f"📦 文件超过 {budget:.0f} MB，已改为发送直链，点开即可播放"
+                )
+
             yield event.plain_result(self._text_reply(result, note))
 
     @filter.command("有兽焉帮助")
@@ -241,6 +289,37 @@ class YoushouyanPlugin(Star):
             f"· 调用次数：{key.get('call_count', '-')}",
             f"· 账号：{user.get('nickname') or user.get('id') or '-'}",
         ]
+
+        # 两个网盘各查一次，方便判断内容到底在哪边
+        for source, label in (("own", "我的网盘"), ("public", "公共网盘")):
+            try:
+                count = await self.api.count_videos(source)
+                mark = " ← 当前" if source == self.api.source else ""
+                lines.append(f"· {label}：{count} 个视频{mark}")
+            except ApiError as exc:
+                lines.append(f"· {label}：查询失败（{exc}）")
+
+        budget = self._upload_budget_mb(
+            self._int_conf("max_send_size_mb", _DEFAULT_MAX_SEND_MB)
+        )
+        budget_text = "不限" if budget == float("inf") else f"{budget:.0f} MB"
+        if self._upload_limit_mb is not None:
+            budget_text += "（上传失败后已自动收紧）"
+        lines.append(f"· 直发上限：{budget_text}")
+
+        passwords = self.api.folder_passwords
+        if passwords:
+            lines.append(f"· 目录密码：已配置 {len(passwords)} 个")
+
+        folders = await self.api.public_folders()
+        if folders:
+            shown = []
+            for folder in folders[:5]:
+                name = str(folder.get("name") or folder.get("id") or "-")
+                shown.append(name + ("🔒" if folder.get("has_password") else ""))
+            lines.append(f"· 公共网盘目录：{'、'.join(shown)}")
+            if not passwords and any(f.get("has_password") for f in folders):
+                lines.append("   └ 🔒 的目录带密码，不给密码看不到里面的文件")
         yield event.plain_result("\n".join(lines))
 
     async def terminate(self) -> None:
