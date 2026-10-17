@@ -103,13 +103,16 @@ class EpisodeResult:
     size_text: str = ""
     expires_at: int = 0
     expires_in: int = 0
+    keyword: str = ""
 
     @property
     def display_name(self) -> str:
         return os.path.splitext(os.path.basename(self.title))[0].strip()
 
     def headline(self, show_filename: bool = False) -> str:
-        head = f"🐾 有兽焉 第{self.episode}话"
+        # 换片子时标题也跟着变，别把「有兽焉」写死
+        name = (self.keyword or "").strip() or "有兽焉"
+        head = f"🐾 {name} 第{self.episode}话" if self.episode else f"🐾 {name}"
         extras: List[str] = []
         if self.size_text:
             extras.append(self.size_text)
@@ -320,14 +323,35 @@ class MediaAPI:
 
     # ---------------------------------------------------------------- 列表
 
-    async def fetch_videos(self, refresh: bool = False) -> List[Dict[str, Any]]:
+    def _effective_keyword(self, keyword: Optional[str] = None) -> str:
+        """本次检索用的关键词：指令里带了就用指令的，否则用配置里的默认片名。"""
+        if keyword is not None:
+            return str(keyword).strip()
+        return self.keyword
+
+    @staticmethod
+    def _matches(video: Dict[str, Any], keyword: str) -> bool:
+        """文件名或所在目录名包含关键词即命中（不区分大小写）。"""
+        if not keyword:
+            return True
+        needle = keyword.lower()
+        name = str(video.get("filename") or "").lower()
+        folder = str(video.get("_folder") or "").lower()
+        return needle in name or needle in folder
+
+    async def fetch_videos(
+        self, refresh: bool = False, keyword: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """拉取关键词匹配的视频列表（带缓存、自动翻页）。"""
+        kw = self._effective_keyword(keyword)
+
         # 公共网盘走 public.php：media.php 的 source=public 看不到受密码保护的目录
         if self.source == "public":
-            return await self.fetch_public_videos(refresh)
+            videos = await self.fetch_public_videos(refresh)
+            return [v for v in videos if self._matches(v, kw)]
 
-        # 缓存键带上来源与密码集合，切换 own/public 或改密码都不会串用旧结果
-        cache_key = f"{self.source}:{self.folder_password}:{self.keyword}"
+        # 缓存键带上来源、密码集合与关键词，切换 own/public 或改密码都不会串用旧结果
+        cache_key = f"{self.source}:{self.folder_password}:{kw}"
         cached = self._list_cache.get(cache_key)
         ttl = max(0, self._int("cache_ttl", 300))
         if not refresh and cached and time.time() - cached[0] <= ttl:
@@ -342,7 +366,7 @@ class MediaAPI:
         videos: List[Dict[str, Any]] = []
         seen: set = set()
         for pwd in passes:
-            for item in await self._fetch_pages(pwd):
+            for item in await self._fetch_pages(pwd, kw):
                 fingerprint = (item.get("id"), item.get("filename"))
                 if fingerprint in seen:
                     continue
@@ -359,13 +383,15 @@ class MediaAPI:
         videos = [v for v in videos if str(v.get("mime", "")).startswith("video/")]
         self._list_cache[cache_key] = (time.time(), videos)
         logger.info(
-            f"[有兽焉] {self.source_label} 关键词「{self.keyword}」"
+            f"[有兽焉] {self.source_label} 关键词「{kw or '全部'}」"
             f"匹配到 {len(videos)} 个视频"
             f"（密码 {len(passes) - 1} 个）"
         )
         return videos
 
-    async def _fetch_pages(self, password: str = "") -> List[Dict[str, Any]]:
+    async def _fetch_pages(
+        self, password: str = "", keyword: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """按指定密码（空串 = 不带密码）翻页拉取原始列表。"""
         page_size = min(100, max(1, self._int("page_size", 100)))
         max_pages = max(1, self._int("max_pages", 5))
@@ -376,7 +402,7 @@ class MediaAPI:
                 "list",
                 page=page,
                 page_size=page_size,
-                q=self.keyword or None,
+                q=self._effective_keyword(keyword) or None,
                 **self._source_params(password),
             )
             batch = data.get("list") or []
@@ -591,7 +617,9 @@ class MediaAPI:
         media.php 的 source=public 只列公开部分，受密码保护的目录完全不返回，
         所以公共网盘必须走 public.php 自己走目录树。
         """
-        cache_key = f"public:{self.folder_password}:{self.keyword}"
+        # 公共网盘是一次性把整棵树扫回来，关键词在本地过滤，
+        # 所以缓存键不带关键词——换关键词搜索不用重新遍历目录
+        cache_key = f"public:{self.folder_password}"
         cached = self._list_cache.get(cache_key)
         ttl = max(0, self._int("cache_ttl", 300))
         if not refresh and cached and time.time() - cached[0] <= ttl:
@@ -601,13 +629,13 @@ class MediaAPI:
         max_pages = max(1, self._int("max_pages", 5))
         page_size = min(100, max(1, self._int("page_size", 100)))
 
-        queue: List[Tuple[int, str]] = [(0, "")]
+        queue: List[Tuple[int, str, str]] = [(0, "", "")]
         visited: set = set()
         videos: List[Dict[str, Any]] = []
         seen_files: set = set()
 
         while queue and len(visited) < max_folders:
-            folder_id, inherited = queue.pop(0)
+            folder_id, inherited, folder_name = queue.pop(0)
             if folder_id in visited:
                 continue
             visited.add(folder_id)
@@ -643,7 +671,7 @@ class MediaAPI:
             for raw in batch if isinstance(batch, list) else []:
                 if not isinstance(raw, dict):
                     continue
-                item = self._normalize_public_file(raw, password)
+                item = self._normalize_public_file(raw, password, folder_name)
                 if not item:
                     continue
                 fingerprint = item.get("id")
@@ -660,7 +688,7 @@ class MediaAPI:
                 except (TypeError, ValueError):
                     sub_id = 0
                 if sub_id and sub_id not in visited:
-                    queue.append((sub_id, password))
+                    queue.append((sub_id, password, str(sub.get("name") or "")))
 
         self._list_cache[cache_key] = (time.time(), videos)
         logger.info(
@@ -671,7 +699,7 @@ class MediaAPI:
 
     @staticmethod
     def _normalize_public_file(
-        raw: Dict[str, Any], password: str
+        raw: Dict[str, Any], password: str, folder_name: str = ""
     ) -> Optional[Dict[str, Any]]:
         """把 public.php 的列表项补成 media.php 那种字段，方便复用匹配逻辑。"""
         name = str(raw.get("filename") or "")
@@ -688,6 +716,7 @@ class MediaAPI:
             item["size"] = 0
         item["size_text"] = str(raw.get("file_size_text") or "")
         item["_password"] = password
+        item["_folder"] = folder_name
         return item
 
     async def public_play_url(self, video: Dict[str, Any]) -> EpisodeResult:
@@ -751,19 +780,37 @@ class MediaAPI:
         finally:
             self._source_override = previous
 
-    async def find_episode(self, episode: int) -> EpisodeResult:
-        """按话数找视频并换取播放直链。"""
+    async def search(
+        self, keyword: str, limit: int = 10
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """按关键词搜文件，返回（命中的文件, 该来源下总共有多少个视频）。"""
+        kw = str(keyword or "").strip()
+        if not kw:
+            raise ApiError("请给个关键词，例如「/找 有兽焉」")
+
+        videos = await self.fetch_videos(keyword=kw)
+        if not videos:
+            # 关键词可能刚出现，强制刷新一次列表再试
+            videos = await self.fetch_videos(refresh=True, keyword=kw)
+        hits = [v for v in videos if self._matches(v, kw)]
+        hits.sort(key=lambda item: str(item.get("filename") or ""))
+        return hits[: max(1, limit)], len(videos)
+
+    async def find_episode(
+        self, episode: int, keyword: Optional[str] = None
+    ) -> EpisodeResult:
+        """按话数找视频并换取播放直链，keyword 为空时用配置里的默认片名。"""
         if not self.configured:
             raise ApiError("还没配置接口地址或 API 密钥")
 
-        videos = await self.fetch_videos()
+        videos = await self.fetch_videos(keyword=keyword)
         candidate = _pick_best(videos, episode)
         if candidate is None:
             # 可能是刚上传、还没进缓存，强制刷新一次
-            videos = await self.fetch_videos(refresh=True)
+            videos = await self.fetch_videos(refresh=True, keyword=keyword)
             candidate = _pick_best(videos, episode)
         if candidate is None:
-            scope = self.keyword or "全部"
+            scope = self._effective_keyword(keyword) or "全部"
             suffix = f"（{self.source_label}共 {len(videos)} 个视频）" if videos else ""
             hint = ""
             if self.source == "public" and not self.folder_passwords:
@@ -775,6 +822,7 @@ class MediaAPI:
 
         result = await self.get_play_url(candidate)
         result.episode = episode
+        result.keyword = self._effective_keyword(keyword) or "有兽焉"
         return result
 
     def clear_cache(self) -> None:

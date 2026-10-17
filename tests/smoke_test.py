@@ -36,6 +36,11 @@ VIDEOS = [
      "size_text": "100 MB", "mime": "video/mp4", "create_time": 1760000070},
     {"id": 99, "filename": "有兽焉 主题曲.mp3", "size": 10485760,
      "size_text": "10 MB", "mime": "audio/mpeg", "create_time": 1760000080},
+    # 别的片子：验证关键词能跟着指令走，而不是写死「有兽焉」
+    {"id": 201, "filename": "斗破苍穹 第3话.mp4", "size": 314572800,
+     "size_text": "300 MB", "mime": "video/mp4", "create_time": 1760000090},
+    {"id": 202, "filename": "斗破苍穹 第4话.mp4", "size": 314572800,
+     "size_text": "300 MB", "mime": "video/mp4", "create_time": 1760000095},
 ]
 
 # 受密码保护的公共目录：不带对密码时，list 里看不到这些文件
@@ -403,6 +408,30 @@ async def main() -> int:
     }
     plugin = plugin_main.YoushouyanPlugin(context=None, config=config)
 
+    print("\n== 片名 + 话数解析 ==")
+    from parser import parse_query
+
+    qcases = [
+        ("/看 有兽焉第12话", [12], "有兽焉"),
+        ("/看 斗破苍穹第5话", [5], "斗破苍穹"),
+        ("/看 三体 08", [8], "三体"),
+        ("/看 有兽焉第1-3话", [1, 2, 3], "有兽焉"),
+        ("/看 第12话", [12], ""),
+        ("/找 有兽焉", [], "有兽焉"),
+        ("/看 有兽焉 12", [12], "有兽焉"),
+        ("有兽焉第6话", [6], "有兽焉"),
+    ]
+    for text, want_eps, want_kw in qcases:
+        try:
+            q = parse_query(text, 3)
+            got = (q.episodes, q.keyword)
+        except Exception as exc:  # noqa: BLE001
+            got = (f"异常 {exc}", "")
+        ok = got == (want_eps, want_kw)
+        if not ok:
+            failed += 1
+        print(f"  {'✓' if ok else '✗'} {text} → {got}（期望 {want_eps}, {want_kw!r}）")
+
     print("\n== 指令流程 ==")
     cases = [
         "/看 有兽焉第12话",
@@ -506,6 +535,64 @@ async def main() -> int:
     else:
         failed += 1
         print(f"  ✗ 仍然请求了接口：{before} -> {_Handler.hits}")
+
+    print("\n== 搜别的片子（关键词跟着指令走）==")
+    searcher = plugin_main.YoushouyanPlugin(
+        context=None, config={**config, "link_only": True, "max_send_size_mb": 0}
+    )
+
+    event = FakeEvent("/找 斗破苍穹")
+    async for _ in searcher.find_command(event):
+        pass
+    out = _show(event)
+    if "搜到 2 个" in out and "斗破苍穹 第3话" in out:
+        print(f"  ✓ 关键词搜索列出结果：{out[:60]}")
+    else:
+        print(f"  ✗ 搜索结果不对：{out[:100]}")
+        failed += 1
+
+    event = FakeEvent("/看 斗破苍穹第4话")
+    async for _ in searcher.watch(event):
+        pass
+    out = _show(event)
+    if "第4话" in out and "🔗" in out and "有兽焉" not in out:
+        print(f"  ✓ 换片名也能直接播放：{out[:60]}")
+    else:
+        print(f"  ✗ 换片名失败：{out[:100]}")
+        failed += 1
+
+    event = FakeEvent("/找 斗破苍穹第3话")
+    async for _ in searcher.find_command(event):
+        pass
+    out = _show(event)
+    if "🔗" in out and "搜到" not in out:
+        print("  ✓ /找 带话数时等同于 /看，直接给直链")
+    else:
+        print(f"  ✗ /找 带话数没直接播放：{out[:80]}")
+        failed += 1
+
+    event = FakeEvent("/找 不存在的片子")
+    async for _ in searcher.find_command(event):
+        pass
+    if "没搜到" in _show(event):
+        print("  ✓ 搜不到时给明确提示")
+    else:
+        print(f"  ✗ 搜不到却没提示：{_show(event)[:80]}")
+        failed += 1
+
+    single = plugin_main.YoushouyanPlugin(
+        context=None,
+        config={**config, "link_only": True, "max_send_size_mb": 0, "search_limit": 2},
+    )
+    event = FakeEvent("/找 有兽焉")  # 有 6 个，只显示前 2 个
+    async for _ in single.find_command(event):
+        pass
+    out = _show(event)
+    if "只显示前" in out:
+        print("  ✓ 命中超过上限时提示缩小范围")
+    else:
+        print(f"  ✗ 没有截断提示：{out[:80]}")
+        failed += 1
 
     print("\n== 上传失败自动降级 ==")
     uploader = plugin_main.YoushouyanPlugin(

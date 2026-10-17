@@ -72,6 +72,12 @@
     "default": 0,
     "hint": "0 表示不限制；填了会直接拦截超范围的话数。"
   },
+  "search_limit": {
+    "description": "搜索结果条数",
+    "type": "int",
+    "default": 10,
+    "hint": "/找 关键词 一次最多列多少个文件。"
+  },
   "max_range": {
     "description": "单次最多查询话数",
     "type": "int",

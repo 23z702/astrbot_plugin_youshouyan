@@ -1,8 +1,9 @@
-"""指令文本解析：从 /看 有兽焉第12话 这类消息里提取话数。"""
+"""指令文本解析：从 /看 有兽焉第12话 这类消息里提取片名与话数。"""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import List
 
 # 中文数字
@@ -42,11 +43,39 @@ _COMMAND_WORDS = (
     "kan",
 )
 
+# parse_query 只剥「动词」，片名要留下来当检索关键词
+_PREFIX_WORDS = (
+    "看有兽焉",
+    "youshouyan",
+    "看看",
+    "看",
+    "kan",
+    "找",
+    "搜索",
+    "搜",
+    "search",
+    "find",
+    "我要看",
+    "想看",
+)
+
+_TITLE_TAIL = re.compile(r"[\s/／!！。.,，、:：~～\-—_+]+$")
+_TITLE_HEAD = re.compile(r"^[\s/／!！。.,，、:：~～\-—_+]+")
+_NOISE_TAIL = ("全集", "在线观看", "在线", "视频", "的")
+
 DEFAULT_MAX_RANGE = 3
 
 
 class ParseError(ValueError):
     """指令参数无法解析。"""
+
+
+@dataclass
+class Query:
+    """一次指令的解析结果：话数列表 + 片名关键词。"""
+
+    episodes: List[int] = field(default_factory=list)
+    keyword: str = ""
 
 
 def cn_to_int(text: str) -> int:
@@ -92,6 +121,75 @@ def strip_command(text: str) -> str:
                 changed = True
                 break
     return body.strip()
+
+
+def strip_prefix(text: str) -> str:
+    """只剥掉开头的命令动词与标点，保留片名（如「有兽焉第12话」）。"""
+    body = (text or "").strip()
+    changed = True
+    while changed and body:
+        changed = False
+        body = _TITLE_HEAD.sub("", body)
+        lowered = body.lower()
+        for word in _PREFIX_WORDS:
+            if lowered.startswith(word):
+                body = body[len(word):]
+                changed = True
+                break
+    return body.strip()
+
+
+def _clean_title(text: str) -> str:
+    title = _TITLE_TAIL.sub("", _TITLE_HEAD.sub("", text or ""))
+    for tail in _NOISE_TAIL:
+        if title.endswith(tail) and len(title) > len(tail):
+            title = title[: -len(tail)]
+    return title.strip()
+
+
+def parse_query(text: str, max_range: int = DEFAULT_MAX_RANGE) -> Query:
+    """解析指令，同时给出话数与片名关键词。
+
+    「/看 斗破苍穹第5话」→ Query([5], "斗破苍穹")
+    「/找 有兽焉」       → Query([], "有兽焉")    ← 搜索模式
+    「/看 第12话」       → Query([12], "")        ← 关键词留空，用配置里的默认片名
+    """
+    body = strip_prefix(text)
+    if not body:
+        raise ParseError("请告诉我要看什么")
+
+    match = _RANGE_RE.search(body)
+    if match:
+        start = cn_to_int(match.group(1))
+        end = cn_to_int(match.group(2))
+        if start <= 0 or end <= 0:
+            raise ParseError("话数必须大于 0")
+        if end < start:
+            start, end = end, start
+        count = end - start + 1
+        limit = max(1, int(max_range or DEFAULT_MAX_RANGE))
+        if count > limit:
+            raise ParseError(f"一次最多查询 {limit} 话，当前请求了 {count} 话")
+        return Query(list(range(start, end + 1)), _clean_title(body[: match.start()]))
+
+    match = _EPISODE_RE.search(body)
+    if match:
+        number = cn_to_int(match.group(1))
+        if number <= 0:
+            raise ParseError("话数必须大于 0")
+        return Query([number], _clean_title(body[: match.start()]))
+
+    # 没有「第N话」：末尾的裸数字当话数，其余部分当片名
+    match = _BARE_NUM_RE.search(body)
+    if match:
+        number = int(match.group(1))
+        if number <= 0:
+            raise ParseError("话数必须大于 0")
+        title = _clean_title(body[: match.start()] + body[match.end():])
+        return Query([number], title)
+
+    # 一个数字都没有 → 纯搜索
+    return Query([], _clean_title(body))
 
 
 def parse_request(text: str, max_range: int = DEFAULT_MAX_RANGE) -> List[int]:

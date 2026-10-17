@@ -29,14 +29,19 @@ except Exception:  # noqa: BLE001
     Plain = Video = None  # type: ignore
 
 try:  # 正常包方式加载
-    from .api import ApiError, EpisodeResult, MediaAPI
-    from .parser import ParseError, parse_request, strip_command
+    from .api import ApiError, EpisodeResult, MediaAPI, human_size
+    from .parser import ParseError, Query, parse_query, strip_command
 except ImportError:  # 某些加载器以单文件方式导入
-    from api import ApiError, EpisodeResult, MediaAPI  # type: ignore
-    from parser import ParseError, parse_request, strip_command  # type: ignore
+    from api import ApiError, EpisodeResult, MediaAPI, human_size  # type: ignore
+    from parser import (  # type: ignore
+        ParseError,
+        Query,
+        parse_query,
+        strip_command,
+    )
 
 PLUGIN_NAME = "astrbot_plugin_youshouyan"
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 # QQ 群视频走 highway 上传，实测超过约 50MB 会在上传中途失败（retcode 1200 / 102902），
 # 所以默认阈值取 50MB；真发失败时还会自动收紧并记住。
@@ -48,6 +53,8 @@ HELP_TEXT = (
     "🐾 有兽焉追番\n"
     "用法：/看 有兽焉第12话\n"
     "也支持：/看 有兽焉 第12集、/看 有兽焉 12、/看 有兽焉第1-3话\n"
+    "换成别的片子也行：/看 斗破苍穹第5话、/看 三体 08\n"
+    "找文件：/找 关键词（不带话数就列出匹配的文件）\n"
     "自检：/有兽焉自检"
 )
 
@@ -255,7 +262,7 @@ class YoushouyanPlugin(Star):
         strict = bool(re.match(r"^\s*[/／!！。.]", raw))
 
         try:
-            episodes: List[int] = parse_request(raw, self._int_conf("max_range", 3))
+            query: Query = parse_query(raw, self._int_conf("max_range", 3))
         except ParseError as exc:
             body = strip_command(raw)
             if not body:
@@ -265,8 +272,57 @@ class YoushouyanPlugin(Star):
             # 闲聊里顺口带个「看」字，不打扰
             return
 
+        # 指令里没写片名就用配置里的默认关键词；写了就以指令为准
+        keyword = query.keyword or self.api.keyword
+        episodes = query.episodes
+
+        # /看 关键词：没给话数时当作搜索，但只认 / 开头的，避免闲聊误触
+        if not episodes:
+            if strict and query.keyword:
+                async for item in self._search_reply(event, query.keyword):
+                    yield item
+                return
+            yield event.plain_result(HELP_TEXT)
+            return
+
+        async for item in self._play(event, episodes, keyword):
+            yield item
+
+    @filter.command("找", alias={"搜索", "搜", "search", "find", "找文件"})
+    async def find_command(self, event: AstrMessageEvent) -> AsyncGenerator:
+        """/找 关键词 —— 不写话数就列出匹配到的文件。"""
+        raw = self._raw_text(event)
+        try:
+            query: Query = parse_query(raw, self._int_conf("max_range", 3))
+        except ParseError:
+            yield event.plain_result(HELP_TEXT)
+            return
+
+        keyword = query.keyword or self.api.keyword
+        if not keyword:
+            yield event.plain_result("🔍 想找什么？例如：/找 有兽焉")
+            return
+
+        if query.episodes:  # /找 有兽焉 12 等同于 /看 有兽焉 12
+            async for item in self._play(event, query.episodes, keyword):
+                yield item
+            return
+
+        async for item in self._search_reply(event, keyword):
+            yield item
+
+    # ------------------------------------------------------------ 取片与搜索
+
+    async def _play(
+        self, event: AstrMessageEvent, episodes: List[int], keyword: str
+    ) -> AsyncGenerator:
+        """按话数取片并发送。"""
+        if not self.api.configured:
+            yield event.plain_result(UNCONFIGURED_TEXT)
+            return
+
         max_episode = self._int_conf("max_episode", 0)
-        if max_episode > 0:
+        if max_episode > 0 and keyword in ("", self.api.keyword):
             invalid = [ep for ep in episodes if ep > max_episode]
             if invalid:
                 yield event.plain_result(
@@ -274,21 +330,12 @@ class YoushouyanPlugin(Star):
                 )
                 return
 
-        if not self.api.configured:
-            yield event.plain_result(UNCONFIGURED_TEXT)
-            return
-
-        link_only = self._bool_conf("link_only", False)
-        max_mb = max(0, self._int_conf("max_send_size_mb", _DEFAULT_MAX_SEND_MB))
-        mode = self._str_conf("upload_mode", "auto").lower()
-        allow_file = mode in ("auto", "group_file")
-
         for index, episode in enumerate(episodes):
             if index:
                 await asyncio.sleep(0.6)  # 范围查询稍作间隔，避免触发限流
 
             try:
-                result = await self.api.find_episode(episode)
+                result = await self.api.find_episode(episode, keyword)
             except ApiError as exc:
                 logger.warning(f"[有兽焉] 第{episode}话获取失败：{exc}（code={exc.code}）")
                 yield event.plain_result(self._error_reply(episode, exc))
@@ -298,37 +345,97 @@ class YoushouyanPlugin(Star):
                 yield event.plain_result(f"❌ 第{episode}话出错了：{exc}")
                 continue
 
-            budget = self._upload_budget_mb(max_mb)
-            too_big = result.size_bytes > 0 and result.size_bytes > budget * 1024 * 1024
+            async for item in self._deliver(event, result, episode):
+                yield item
 
-            # 1) 先按老办法直接发视频消息（小文件最省事）
-            if (
-                mode in ("auto", "video")
-                and not link_only
-                and not too_big
-                and Video is not None
-            ):
-                if await self._try_send_video(event, result):
-                    continue
+    async def _deliver(
+        self, event: AstrMessageEvent, result: EpisodeResult, episode: int = 0
+    ) -> AsyncGenerator:
+        """把一集送到群里：视频消息 → 群文件 → 直链。"""
+        link_only = self._bool_conf("link_only", False)
+        max_mb = max(0, self._int_conf("max_send_size_mb", _DEFAULT_MAX_SEND_MB))
+        mode = self._str_conf("upload_mode", "auto").lower()
+        allow_file = mode in ("auto", "group_file")
 
-            # 2) 视频消息发不出去（或文件太大）→ 传到群文件，QQ 内可直接播放
-            if allow_file and not link_only:
-                if await self._try_group_file(event, result):
-                    yield event.plain_result(
-                        f"📁 第{episode}话已上传到群文件：{result.title or ''}\n"
-                        f"{result.headline()}\n"
-                        "在群文件里点开就能看，不受视频消息 50MB 的限制"
-                    )
-                    continue
+        budget = self._upload_budget_mb(max_mb)
+        too_big = result.size_bytes > 0 and result.size_bytes > budget * 1024 * 1024
 
-            # 3) 兜底：发直链
-            note = ""
-            if too_big:
-                note = f"📦 文件超过 {budget:.0f} MB，已改为发送直链，点开即可播放"
-            elif not link_only:
-                note = "📦 视频没能直接发出（多半是平台上传限制），已改为发送直链"
+        # 1) 先按老办法直接发视频消息（小文件最省事）
+        if (
+            mode in ("auto", "video")
+            and not link_only
+            and not too_big
+            and Video is not None
+        ):
+            if await self._try_send_video(event, result):
+                return
 
-            yield event.plain_result(self._text_reply(result, note))
+        # 2) 视频消息发不出去（或文件太大）→ 传到群文件，QQ 内可直接播放
+        if allow_file and not link_only:
+            if await self._try_group_file(event, result):
+                yield event.plain_result(
+                    f"📁 第{episode}话已上传到群文件：{result.title or ''}\n"
+                    f"{result.headline()}\n"
+                    "在群文件里点开就能看，不受视频消息 50MB 的限制"
+                )
+                return
+
+        # 3) 兜底：发直链
+        note = ""
+        if too_big:
+            note = f"📦 文件超过 {budget:.0f} MB，已改为发送直链，点开即可播放"
+        elif not link_only:
+            note = "📦 视频没能直接发出（多半是平台上传限制），已改为发送直链"
+
+        yield event.plain_result(self._text_reply(result, note))
+
+    async def _search_reply(self, event: AstrMessageEvent, keyword: str) -> AsyncGenerator:
+        """关键词搜索，列出匹配到的文件；只命中一个就直接送上去。"""
+        if not self.api.configured:
+            yield event.plain_result(UNCONFIGURED_TEXT)
+            return
+
+        limit = self._int_conf("search_limit", 10)
+        try:
+            hits, total = await self.api.search(keyword, limit)
+        except ApiError as exc:
+            yield event.plain_result(f"❌ 搜索失败：{exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[有兽焉] 搜索未预期异常")
+            yield event.plain_result(f"❌ 搜索出错了：{exc}")
+            return
+
+        if not hits:
+            yield event.plain_result(
+                f"🔍 「{keyword}」没搜到文件"
+                f"（{self.api.source_label}共 {total} 个视频）\n"
+                "换个说法试试，或确认文件已经传到网盘里了"
+            )
+            return
+
+        if len(hits) == 1:
+            try:
+                result = await self.api.get_play_url(hits[0])
+            except ApiError as exc:
+                yield event.plain_result(f"❌ 取直链失败：{exc}")
+                return
+            async for item in self._deliver(event, result):
+                yield item
+            return
+
+        lines = [f"🔍 「{keyword}」搜到 {len(hits)} 个文件："]
+        for item in hits:
+            name = str(item.get("filename") or "-")
+            try:
+                size = int(item.get("size") or item.get("file_size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            lines.append(f"· {name}" + (f"（{human_size(size)}）" if size else ""))
+        if len(hits) == limit:
+            lines.append(f"…只显示前 {limit} 个，把关键词写全一点可以缩小范围")
+        lines.append(f"直接播放：/看 {keyword}第N话")
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("有兽焉帮助")
     async def help_command(self, event: AstrMessageEvent) -> AsyncGenerator:
@@ -381,6 +488,8 @@ class YoushouyanPlugin(Star):
         if self._upload_limit_mb is not None:
             budget_text += "（上传失败后已自动收紧）"
         lines.append(f"· 直发上限：{budget_text}")
+
+        lines.append(f"· 默认片名：{self.api.keyword or '（空 = 检索全部）'}")
 
         mode = self._str_conf("upload_mode", "auto")
         mode_text = {
