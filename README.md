@@ -4,6 +4,10 @@ AstrBot 插件：发送 `/看 有兽焉第12话`，从站点媒体接口取回�
 
 数据来源：`/api/media.php`（`list` 检索 + `video` 换取限时直链），鉴权用 `X-API-Key`。
 
+##如何获取秘钥
+注册pan.辟邪与天禄.icu
+默认https://pan.辟邪与天禄.icu/api/media.php
+
 ## 支持的说法
 
 | 输入 | 结果 |
