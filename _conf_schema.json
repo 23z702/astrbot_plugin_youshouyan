@@ -2,8 +2,8 @@
   "api_base_url": {
     "description": "媒体接口地址",
     "type": "string",
-    "default": "",
-    "hint": "例如 https://你的域名/api/media.php。中文域名会自动转 punycode，填中文或 xn-- 形式都行。"
+    "default": "https://pan.xn--jhqq4y88zxqsfgb.icu/api/media.php",
+    "hint": "默认已填好，一般不用改。中文域名会自动转 punycode，填中文或 xn-- 形式都行。"
   },
   "api_key": {
     "description": "API 密钥",
@@ -39,8 +39,8 @@
   "site_url": {
     "description": "网盘站点地址",
     "type": "string",
-    "default": "",
-    "hint": "注册、上传、申请 API 密钥都在这个站点。留空则用默认值 https://pan.xn--jhqq4y88zxqsfgb.icu/ 。自检为 0 或报错时会把这个地址回复给用户。"
+    "default": "https://pan.xn--jhqq4y88zxqsfgb.icu/",
+    "hint": "注册、上传、申请 API 密钥都在这个站点。自检为 0 或报错时会把这个地址回复给用户。"
   },
   "folder_password": {
     "description": "公共目录密码",

@@ -40,9 +40,11 @@ git clone https://github.com/23z702/astrbot_plugin_youshouyan.git
 
 ## 必填配置
 
+站点：`https://pan.xn--jhqq4y88zxqsfgb.icu/` —— 先注册/登录，在网页上传文件，再到「用户中心 → 视频 API」创建密钥。
+
 | 配置 | 说明 |
 | --- | --- |
-| `api_base_url` | `https://你的域名/api/media.php`（中文域名会自动转 punycode，填中文或 `xn--` 形式都行） |
+| `api_base_url` | `https://pan.xn--jhqq4y88zxqsfgb.icu/api/media.php`（默认已填好；中文域名会自动转 punycode，填中文或 `xn--` 形式都行） |
 | `api_key` | `pk_` 开头 51 字符，用户中心 → 视频 API → 新建密钥（明文只显示一次） |
 
 密钥用 `X-API-Key` 请求头发送，不依赖 nginx 透传 `Authorization`。

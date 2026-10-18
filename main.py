@@ -41,7 +41,7 @@ except ImportError:  # 某些加载器以单文件方式导入
     )
 
 PLUGIN_NAME = "astrbot_plugin_youshouyan"
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 
 # QQ 群视频走 highway 上传，实测超过约 50MB 会在上传中途失败（retcode 1200 / 102902），
 # 所以默认阈值取 50MB；真发失败时还会自动收紧并记住。
@@ -61,7 +61,7 @@ HELP_TEXT = (
 UNCONFIGURED_TEXT = (
     "⚙️ 有兽焉插件还没配置好\n"
     "请管理员在 AstrBot 管理面板 → 插件 → 有兽焉追番 → 配置 中填写：\n"
-    "· 媒体接口地址（https://你的域名/api/media.php）\n"
+    "· 媒体接口地址（https://pan.xn--jhqq4y88zxqsfgb.icu/api/media.php）\n"
     "· API 密钥（pk_ 开头，用户中心 → 视频 API 中创建）"
 )
 
@@ -72,8 +72,6 @@ SITE_TEXT_TEMPLATE = (
 )
 
 _DIGIT_HINT = re.compile(r"\d|[零〇一二两三四五六七八九十百千]")
-
-_DEFAULT_ENDPOINT = "https://你的域名/api/media.php"
 
 
 def _duration(seconds: int) -> str:
