@@ -156,6 +156,7 @@ def _install_fake_astrbot() -> None:
 class _Handler(BaseHTTPRequestHandler):
     hits: dict = {}
     seen: list = []  # 记录每次请求的 query，便于断言 source 等参数
+    guest_blocked: bool = False  # True 时模拟「公共网盘只允许登录用户」
 
     def _json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode()
@@ -280,6 +281,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _public(self, action: str, query: dict) -> None:
         """模拟站点前端的公共网盘接口：目录带密码，密码不对返回 code 2。"""
+        if _Handler.guest_blocked:
+            self._json(200, {"code": 401, "msg": "请先登录", "data": None})
+            return
+
         folder_id = int((query.get("folder_id") or ["0"])[0])
         pwd = (query.get("folder_password") or [""])[0]
 
@@ -460,6 +465,32 @@ async def main() -> int:
         print("  ✓ 自检为 0 时给出站点地址与注册指引")
     else:
         print(f"  ✗ 自检没提示站点：{status_text[-120:]}")
+        failed += 1
+
+    # 站点关掉「游客访问」时，自检要说清原因，而不是干巴巴 0 个视频
+    _Handler.guest_blocked = True
+    try:
+        blocked = plugin_main.YoushouyanPlugin(
+            context=None,
+            config={**config, "source": "public", "folder_password": "dir-pass"},
+        )
+        event = FakeEvent("/有兽焉自检")
+        async for _ in blocked.status_command(event):
+            pass
+        blocked_text = _show(event)
+        print(f"\n[游客被禁] {blocked_text}")
+
+        event = FakeEvent("/看 有兽焉第13话")
+        async for _ in blocked.watch(event):
+            pass
+        show_blocked = _show(event)
+    finally:
+        _Handler.guest_blocked = False
+
+    if "只对登录用户开放" in blocked_text and "允许游客访问" in show_blocked:
+        print("  ✓ 公共网盘要求登录时，自检与播放都说明原因和解决办法")
+    else:
+        print(f"  ✗ 登录限制没说明：{show_blocked[-120:]}")
         failed += 1
 
     print("\n== 公共网盘（api/public.php）==")

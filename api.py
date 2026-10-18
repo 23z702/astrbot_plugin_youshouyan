@@ -588,6 +588,13 @@ class MediaAPI:
             code = 0
         if code == 2:
             raise ApiError("需要目录密码", 2)
+        if code == 401:
+            # 站点把公共网盘设成「只对登录用户开放」时，游客（含本插件、以及 QQ 播放器）
+            # 连签名直链都拿不到，只能请管理员开游客访问，或改用 own 来源
+            raise ApiError(
+                "公共网盘要求登录后才能访问（站点关掉了游客浏览）",
+                401,
+            )
         if code != 0:
             raise ApiError(str(payload.get("msg") or f"公共网盘接口错误 {code}"), code)
         data = payload.get("data")
@@ -668,6 +675,9 @@ class MediaAPI:
                 first = await self._public_list_folder(folder_id, inherited)
             except ApiError as exc:
                 logger.warning(f"[有兽焉] 列公共目录 {folder_id} 失败：{exc}")
+                if folder_id == 0:
+                    # 根目录都读不到，后面全是白费劲；直接报错，别假装「0 个视频」
+                    raise
                 failed.append(str(exc) or "未知错误")
                 continue
             data, password = first

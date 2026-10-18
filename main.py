@@ -41,7 +41,7 @@ except ImportError:  # 某些加载器以单文件方式导入
     )
 
 PLUGIN_NAME = "astrbot_plugin_youshouyan"
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 # QQ 群视频走 highway 上传，实测超过约 50MB 会在上传中途失败（retcode 1200 / 102902），
 # 所以默认阈值取 50MB；真发失败时还会自动收紧并记住。
@@ -255,13 +255,21 @@ class YoushouyanPlugin(Star):
         return f"{UNCONFIGURED_TEXT}\n\n{self._site_text()}"
 
     def _error_reply(self, episode: int, exc: ApiError) -> str:
+        text = f"❌ 第{episode}话获取失败：{exc}"
+        message = str(exc)
+        if exc.code == 401 and ("登录" in message or "游客" in message):
+            return (
+                f"{text}\n"
+                "💡 站点关掉了公共网盘的游客访问：在站点后台开启「允许游客访问」，"
+                "或把文件传到自己的网盘并把来源改成「我的网盘（own）」\n"
+                f"{self._site_text()}"
+            )
         advice = {
             401: "密钥可能被撤销或过期了，去站点重新创建一个",
             403: "密钥缺少 media 作用域，去站点重新创建",
             429: "接口限流了，等十几分钟再试",
             503: "站点还没执行 install/migrate.php",
         }.get(exc.code)
-        text = f"❌ 第{episode}话获取失败：{exc}"
         if advice:
             text = f"{text}\n💡 {advice}\n{self._site_text()}"
         return text
@@ -496,11 +504,13 @@ class YoushouyanPlugin(Star):
         # 两个网盘各查一次，方便判断内容到底在哪边
         counts: dict = {}
         failed_labels: List[str] = []
+        failed_reasons: dict = {}
         for source, label in (("own", "我的网盘"), ("public", "公共网盘")):
             try:
                 count = await self.api.count_videos(source)
             except ApiError as exc:
                 failed_labels.append(label)
+                failed_reasons[label] = str(exc)
                 lines.append(f"· {label}：查询失败（{exc}）")
                 continue
             counts[source] = count
@@ -534,6 +544,15 @@ class YoushouyanPlugin(Star):
         if empty or failed_folders:
             if empty_labels:
                 lines.append(f"   └ {'、'.join(empty_labels)}里还没有视频（或者这次没读到）")
+            need_login = any(
+                "登录" in reason or "游客" in reason
+                for reason in failed_reasons.values()
+            )
+            if need_login:
+                lines.append(
+                    "   └ 公共网盘现在只对登录用户开放；"
+                    "在站点后台开启「允许游客访问」，或把来源改成「我的网盘（own）」"
+                )
             lines.append(
                 f"   └ 到 {site} 注册/登录后即可上传；API 密钥在「用户中心 → 视频 API」创建"
             )
