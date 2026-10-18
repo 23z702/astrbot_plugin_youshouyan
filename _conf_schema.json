@@ -36,6 +36,12 @@
     "options": ["public", "own"],
     "hint": "public = 公共网盘，own = 自己的网盘。/有兽焉自检 会同时显示两边的视频数量。"
   },
+  "site_url": {
+    "description": "网盘站点地址",
+    "type": "string",
+    "default": "",
+    "hint": "注册、上传、申请 API 密钥都在这个站点。留空则用默认值 https://pan.xn--jhqq4y88zxqsfgb.icu/ 。自检为 0 或报错时会把这个地址回复给用户。"
+  },
   "folder_password": {
     "description": "公共目录密码",
     "type": "string",

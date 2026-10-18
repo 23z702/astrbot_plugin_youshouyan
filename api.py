@@ -51,6 +51,9 @@ _SEASON_RE = re.compile(r"(?i)s\s*0*\d{1,2}\s*[._-]?\s*e")
 # 预告/花絮类，同等匹配时让正片优先
 _BONUS_RE = re.compile(r"(?i)(预告|花絮|特典|彩蛋|片头|片尾|\bpv\b|\bop\d?\b|\bed\d?\b|\bcm\b)")
 
+# 网盘站点（注册、上传、申请 API 密钥都在这里）；配置里 site_url 可覆盖
+DEFAULT_SITE_URL = "https://pan.xn--jhqq4y88zxqsfgb.icu/"
+
 # 公共网盘按扩展名区分文件类型，这些算视频
 _PUBLIC_VIDEO_TYPES = {
     "mp4", "mkv", "mov", "webm", "avi", "m4v", "flv", "ogv", "ts", "wmv", "mpg", "mpeg",
@@ -155,6 +158,8 @@ class MediaAPI:
         self._url_cache: Dict[Tuple[str, int], Tuple[int, EpisodeResult]] = {}
         self._video_pwd: Dict[Tuple[str, int], str] = {}
         self._source_override: Optional[str] = None
+        # 最近一次公共网盘扫描的诊断信息，供自检/报错用
+        self.scan_report: Dict[str, Any] = {}
 
     # ---------------------------------------------------------------- 配置
 
@@ -210,6 +215,18 @@ class MediaAPI:
     @property
     def source_label(self) -> str:
         return "公共网盘" if self.source == "public" else "我的网盘"
+
+    @property
+    def site_url(self) -> str:
+        """网盘站点地址，用来自检/报错时告诉用户去哪注册、上传、申请密钥。"""
+        raw = str(self._get("site_url", "") or "").strip()
+        url = normalize_url(raw or DEFAULT_SITE_URL)
+        return url if url.endswith("/") else f"{url}/"
+
+    def site_hint(self, reason: str = "") -> str:
+        """一句「去站点注册/上传」的提示，reason 说明还缺什么。"""
+        text = f"💡 到 {self.site_url} 注册/登录后就能上传"
+        return f"{text}；{reason}" if reason else text
 
     def _source_params(self, password: Optional[str] = None) -> Dict[str, Any]:
         """source + 目录密码，按需附加到 list 与 video。
@@ -587,14 +604,19 @@ class MediaAPI:
 
         last_error: Optional[ApiError] = None
         for pwd in candidates:
-            try:
-                data = await self._public_list_folder_page(folder_id, pwd, 1)
-            except ApiError as exc:
-                last_error = exc
-                if exc.code == 2:  # 换下一个密码再试
-                    continue
-                raise
-            return data, pwd
+            for attempt in range(2):  # 网络抖动重试一次，避免自检时好时坏
+                try:
+                    data = await self._public_list_folder_page(folder_id, pwd, 1)
+                except ApiError as exc:
+                    last_error = exc
+                    if exc.code == 2:  # 需要密码 → 换下一个密码再试
+                        break
+                    retryable = exc.code not in (400, 401, 403, 404, 429)
+                    if attempt == 0 and retryable:
+                        await asyncio.sleep(0.5)
+                        continue
+                    raise
+                return data, pwd
 
         if last_error is not None:
             logger.debug(f"[有兽焉] 公共目录 {folder_id} 打不开：{last_error}")
@@ -633,6 +655,8 @@ class MediaAPI:
         visited: set = set()
         videos: List[Dict[str, Any]] = []
         seen_files: set = set()
+        locked: List[str] = []
+        failed: List[str] = []
 
         while queue and len(visited) < max_folders:
             folder_id, inherited, folder_name = queue.pop(0)
@@ -644,9 +668,11 @@ class MediaAPI:
                 first = await self._public_list_folder(folder_id, inherited)
             except ApiError as exc:
                 logger.warning(f"[有兽焉] 列公共目录 {folder_id} 失败：{exc}")
+                failed.append(str(exc) or "未知错误")
                 continue
             data, password = first
             if not data:
+                locked.append(folder_name or f"id={folder_id}")
                 continue  # 锁着且没有可用密码
 
             batch = data.get("list") or []
@@ -690,10 +716,23 @@ class MediaAPI:
                 if sub_id and sub_id not in visited:
                     queue.append((sub_id, password, str(sub.get("name") or "")))
 
-        self._list_cache[cache_key] = (time.time(), videos)
+        # 一个都没扫到（尤其是接口报错）时不留缓存，免得「检测失败」被缓存粘住
+        if videos or not failed:
+            self._list_cache[cache_key] = (time.time(), videos)
+        self.scan_report = {
+            "at": time.time(),
+            "folders": len(visited),
+            "videos": len(videos),
+            "locked": locked[:5],
+            "locked_count": len(locked),
+            "failed": failed[:3],
+            "failed_count": len(failed),
+        }
         logger.info(
             f"[有兽焉] 公共网盘扫描 {len(visited)} 个目录，"
             f"得到 {len(videos)} 个视频"
+            + (f"，{len(locked)} 个目录缺密码" if locked else "")
+            + (f"，{len(failed)} 个目录读取失败" if failed else "")
         )
         return videos
 
@@ -772,11 +811,20 @@ class MediaAPI:
         return result
 
     async def count_videos(self, source: str) -> int:
-        """临时切到指定来源统计匹配到的视频数（自检用）。"""
+        """临时切到指定来源统计匹配到的视频数（自检用）。
+
+        网络抖动时接口偶发超时，这里强制刷新重试一次，避免自检时好时坏。
+        """
         previous = self._source_override
         self._source_override = source if source in ("own", "public") else "own"
         try:
-            return len(await self.fetch_videos())
+            try:
+                return len(await self.fetch_videos())
+            except ApiError as exc:
+                if exc.code in (400, 401, 403, 415, 429):
+                    raise  # 密钥/限流类错误重试也没用，反而更糟
+                await asyncio.sleep(0.8)
+                return len(await self.fetch_videos(refresh=True))
         finally:
             self._source_override = previous
 
@@ -796,6 +844,34 @@ class MediaAPI:
         hits.sort(key=lambda item: str(item.get("filename") or ""))
         return hits[: max(1, limit)], len(videos)
 
+    def empty_hint(self) -> str:
+        """没找到文件时的排查提示：锁着的目录要密码，没内容就去站点上传。"""
+        lines: List[str] = []
+        if self.source == "public":
+            report = self.scan_report or {}
+            locked = int(report.get("locked_count") or 0)
+            if locked:
+                names = "、".join(str(n) for n in (report.get("locked") or [])[:3])
+                if self.folder_passwords:
+                    lines.append(
+                        f"🔒 {locked} 个带密码的目录打不开（{names}），"
+                        "密码可能不对，检查「公共目录密码」"
+                    )
+                else:
+                    lines.append(
+                        f"🔒 {locked} 个带密码的目录（{names}）需要密码，"
+                        "在配置「公共目录密码」里填上"
+                    )
+            failed = int(report.get("failed_count") or 0)
+            if failed:
+                reason = str((report.get("failed") or ["接口异常"])[0])
+                lines.append(f"⚠️ {failed} 个目录读取失败（{reason}），稍等再试一次")
+        if self.source == "public":
+            lines.append(self.site_hint("目录密码可向管理员索取"))
+        else:
+            lines.append(self.site_hint("API 密钥在「用户中心 → 视频 API」里申请"))
+        return "\n" + "\n".join(lines)
+
     async def find_episode(
         self, episode: int, keyword: Optional[str] = None
     ) -> EpisodeResult:
@@ -812,11 +888,9 @@ class MediaAPI:
         if candidate is None:
             scope = self._effective_keyword(keyword) or "全部"
             suffix = f"（{self.source_label}共 {len(videos)} 个视频）" if videos else ""
-            hint = ""
-            if self.source == "public" and not self.folder_passwords:
-                hint = "\n💡 公共网盘若有带密码的目录，需在插件配置里填「公共目录密码」"
             raise ApiError(
-                f"{self.source_label}「{scope}」下没有第{episode}话的文件{suffix}{hint}",
+                f"{self.source_label}「{scope}」下没有第{episode}话的文件"
+                f"{suffix}{self.empty_hint()}",
                 404,
             )
 

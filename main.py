@@ -41,7 +41,7 @@ except ImportError:  # 某些加载器以单文件方式导入
     )
 
 PLUGIN_NAME = "astrbot_plugin_youshouyan"
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 # QQ 群视频走 highway 上传，实测超过约 50MB 会在上传中途失败（retcode 1200 / 102902），
 # 所以默认阈值取 50MB；真发失败时还会自动收紧并记住。
@@ -63,6 +63,12 @@ UNCONFIGURED_TEXT = (
     "请管理员在 AstrBot 管理面板 → 插件 → 有兽焉追番 → 配置 中填写：\n"
     "· 媒体接口地址（https://你的域名/api/media.php）\n"
     "· API 密钥（pk_ 开头，用户中心 → 视频 API 中创建）"
+)
+
+# 站点提示：没配好 / 没内容时都带上，方便自己注册、上传、申请密钥
+SITE_TEXT_TEMPLATE = (
+    "🌐 网盘站点：{site}\n"
+    "   注册/登录后可在网页上传文件；API 密钥在「用户中心 → 视频 API」里创建"
 )
 
 _DIGIT_HINT = re.compile(r"\d|[零〇一二两三四五六七八九十百千]")
@@ -242,16 +248,23 @@ class YoushouyanPlugin(Star):
             )
         return "\n".join(lines)
 
-    @staticmethod
-    def _error_reply(episode: int, exc: ApiError) -> str:
+    def _site_text(self) -> str:
+        return SITE_TEXT_TEMPLATE.format(site=self.api.site_url)
+
+    def _unconfigured_text(self) -> str:
+        return f"{UNCONFIGURED_TEXT}\n\n{self._site_text()}"
+
+    def _error_reply(self, episode: int, exc: ApiError) -> str:
         advice = {
-            401: "请在插件配置里更新 API 密钥（可能被撤销或过期了）",
-            403: "该密钥缺少 media 作用域，请在用户中心重新创建",
+            401: "密钥可能被撤销或过期了，去站点重新创建一个",
+            403: "密钥缺少 media 作用域，去站点重新创建",
             429: "接口限流了，等十几分钟再试",
             503: "站点还没执行 install/migrate.php",
         }.get(exc.code)
         text = f"❌ 第{episode}话获取失败：{exc}"
-        return f"{text}\n💡 {advice}" if advice else text
+        if advice:
+            text = f"{text}\n💡 {advice}\n{self._site_text()}"
+        return text
 
     # ------------------------------------------------------------ 指令入口
 
@@ -318,7 +331,7 @@ class YoushouyanPlugin(Star):
     ) -> AsyncGenerator:
         """按话数取片并发送。"""
         if not self.api.configured:
-            yield event.plain_result(UNCONFIGURED_TEXT)
+            yield event.plain_result(self._unconfigured_text())
             return
 
         max_episode = self._int_conf("max_episode", 0)
@@ -392,7 +405,7 @@ class YoushouyanPlugin(Star):
     async def _search_reply(self, event: AstrMessageEvent, keyword: str) -> AsyncGenerator:
         """关键词搜索，列出匹配到的文件；只命中一个就直接送上去。"""
         if not self.api.configured:
-            yield event.plain_result(UNCONFIGURED_TEXT)
+            yield event.plain_result(self._unconfigured_text())
             return
 
         limit = self._int_conf("search_limit", 10)
@@ -409,8 +422,8 @@ class YoushouyanPlugin(Star):
         if not hits:
             yield event.plain_result(
                 f"🔍 「{keyword}」没搜到文件"
-                f"（{self.api.source_label}共 {total} 个视频）\n"
-                "换个说法试试，或确认文件已经传到网盘里了"
+                f"（{self.api.source_label}共 {total} 个视频）"
+                f"{self.api.empty_hint()}"
             )
             return
 
@@ -445,12 +458,16 @@ class YoushouyanPlugin(Star):
     async def status_command(self, event: AstrMessageEvent) -> AsyncGenerator:
         """调用 action=info 检查密钥与接口连通性。"""
         if not self.api.configured:
-            yield event.plain_result(UNCONFIGURED_TEXT)
+            yield event.plain_result(self._unconfigured_text())
             return
         try:
             data = await self.api.check_key()
         except ApiError as exc:
-            yield event.plain_result(f"❌ 接口自检失败：{exc}")
+            yield event.plain_result(
+                f"❌ 接口自检失败：{exc}\n"
+                "💡 确认接口地址填对、密钥没被删除；网络抖动可以稍等再发一次\n"
+                f"{self._site_text()}"
+            )
             return
 
         key = data.get("key") if isinstance(data.get("key"), dict) else {}
@@ -463,6 +480,9 @@ class YoushouyanPlugin(Star):
             left = int(expire) - int(time.time())
             expire_text = f"还剩 {_duration(left)}" if left > 0 else "已过期"
 
+        site = self.api.site_url
+        passwords = self.api.folder_passwords
+
         lines = [
             "🔍 有兽焉接口自检",
             f"· 密钥：{key.get('name') or '-'}（{key.get('prefix') or '-'}）",
@@ -470,16 +490,57 @@ class YoushouyanPlugin(Star):
             f"· 有效期：{expire_text}",
             f"· 调用次数：{key.get('call_count', '-')}",
             f"· 账号：{user.get('nickname') or user.get('id') or '-'}",
+            f"· 站点：{site}",
         ]
 
         # 两个网盘各查一次，方便判断内容到底在哪边
+        counts: dict = {}
+        failed_labels: List[str] = []
         for source, label in (("own", "我的网盘"), ("public", "公共网盘")):
             try:
                 count = await self.api.count_videos(source)
-                mark = " ← 当前" if source == self.api.source else ""
-                lines.append(f"· {label}：{count} 个视频{mark}")
             except ApiError as exc:
+                failed_labels.append(label)
                 lines.append(f"· {label}：查询失败（{exc}）")
+                continue
+            counts[source] = count
+            mark = " ← 当前" if source == self.api.source else ""
+            lines.append(f"· {label}：{count} 个视频{mark}")
+
+        # 公共网盘扫描的细枝末节：锁着的目录、读失败的目录
+        report = self.api.scan_report or {}
+        locked = int(report.get("locked_count") or 0)
+        failed_folders = int(report.get("failed_count") or 0)
+        if failed_folders:
+            reason = str((report.get("failed") or ["接口异常"])[0])
+            lines.append(f"   └ ⚠️ {failed_folders} 个目录读取失败：{reason}")
+        if locked:
+            names = "、".join(str(n) for n in (report.get("locked") or [])[:3])
+            state = "密码可能不对" if passwords else "还没配密码"
+            lines.append(f"   └ 🔒 {locked} 个带密码的目录（{names}）打不开，{state}")
+
+        empty_labels = [
+            label
+            for source, label in (("own", "我的网盘"), ("public", "公共网盘"))
+            if source in counts and counts[source] == 0
+        ]
+        empty = bool(empty_labels) or bool(failed_labels)
+
+        lines.append(
+            f"· 目录密码：{f'已配置 {len(passwords)} 个' if passwords else '未配置（带锁的目录看不到）'}"
+        )
+
+        # 有网盘是空的 / 有查询失败 → 直接把站点甩给用户，让他自己去注册和上传
+        if empty or failed_folders:
+            if empty_labels:
+                lines.append(f"   └ {'、'.join(empty_labels)}里还没有视频（或者这次没读到）")
+            lines.append(
+                f"   └ 到 {site} 注册/登录后即可上传；API 密钥在「用户中心 → 视频 API」创建"
+            )
+            if self.api.source == "public":
+                lines.append("   └ 带密码的目录，把密码填到配置「公共目录密码」里才能看到")
+            if failed_labels or failed_folders:
+                lines.append("   └ 有查询没成功，隔一会儿再发一次自检会更准")
 
         budget = self._upload_budget_mb(
             self._int_conf("max_send_size_mb", _DEFAULT_MAX_SEND_MB)
@@ -500,10 +561,6 @@ class YoushouyanPlugin(Star):
         }.get(mode, mode)
         lines.append(f"· 发送方式：{mode_text}")
 
-        passwords = self.api.folder_passwords
-        if passwords:
-            lines.append(f"· 目录密码：已配置 {len(passwords)} 个")
-
         folders = await self.api.public_folders()
         if folders:
             shown = []
@@ -511,8 +568,9 @@ class YoushouyanPlugin(Star):
                 name = str(folder.get("name") or folder.get("id") or "-")
                 shown.append(name + ("🔒" if folder.get("has_password") else ""))
             lines.append(f"· 公共网盘目录：{'、'.join(shown)}")
-            if not passwords and any(f.get("has_password") for f in folders):
-                lines.append("   └ 🔒 的目录带密码，不给密码看不到里面的文件")
+        elif empty:
+            lines.append("· 公共网盘目录：还没有（或接口暂时读不到）")
+
         yield event.plain_result("\n".join(lines))
 
     async def terminate(self) -> None:

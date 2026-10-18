@@ -452,8 +452,14 @@ async def main() -> int:
     event = FakeEvent("/有兽焉自检")
     async for _ in plugin.status_command(event):
         pass
-    print(_show(event))
-    if "客厅电视" not in _show(event) or "永久" not in _show(event):
+    status_text = _show(event)
+    print(status_text)
+    if "客厅电视" not in status_text or "永久" not in status_text:
+        failed += 1
+    if "站点：" in status_text and "注册/登录后即可上传" in status_text:
+        print("  ✓ 自检为 0 时给出站点地址与注册指引")
+    else:
+        print(f"  ✗ 自检没提示站点：{status_text[-120:]}")
         failed += 1
 
     print("\n== 公共网盘（api/public.php）==")
@@ -574,10 +580,13 @@ async def main() -> int:
     event = FakeEvent("/找 不存在的片子")
     async for _ in searcher.find_command(event):
         pass
-    if "没搜到" in _show(event):
+    miss_text = _show(event)
+    if "没搜到" in miss_text and "注册/登录后就能上传" in miss_text:
+        print("  ✓ 搜不到时给明确提示，并带上站点注册地址")
+    elif "没搜到" in miss_text:
         print("  ✓ 搜不到时给明确提示")
     else:
-        print(f"  ✗ 搜不到却没提示：{_show(event)[:80]}")
+        print(f"  ✗ 搜不到却没提示：{miss_text[:80]}")
         failed += 1
 
     single = plugin_main.YoushouyanPlugin(
@@ -690,6 +699,9 @@ async def main() -> int:
     print(f"错误密钥：{_show(event)}")
     if "401" not in _show(event) and "密钥" not in _show(event):
         failed += 1
+    if "站点：" not in _show(event) or "注册" not in _show(event):
+        print("  ✗ 401 时没告诉用户去站点重新取密钥")
+        failed += 1
 
     bare = plugin_main.YoushouyanPlugin(context=None, config={})
     event = FakeEvent("/看 有兽焉第5话")
@@ -697,6 +709,9 @@ async def main() -> int:
         pass
     print(f"未配置：{_show(event)}")
     if "还没配置好" not in _show(event):
+        failed += 1
+    if "站点：" not in _show(event):
+        print("  ✗ 未配置时没给出站点地址")
         failed += 1
 
     limited = plugin_main.YoushouyanPlugin(
