@@ -29,9 +29,11 @@ except Exception:  # noqa: BLE001
     Plain = Video = None  # type: ignore
 
 try:  # 正常包方式加载
+    from . import settings
     from .api import ApiError, EpisodeResult, MediaAPI, human_size
     from .parser import ParseError, Query, parse_query, strip_command
 except ImportError:  # 某些加载器以单文件方式导入
+    import settings  # type: ignore
     from api import ApiError, EpisodeResult, MediaAPI, human_size  # type: ignore
     from parser import (  # type: ignore
         ParseError,
@@ -41,7 +43,7 @@ except ImportError:  # 某些加载器以单文件方式导入
     )
 
 PLUGIN_NAME = "astrbot_plugin_youshouyan"
-VERSION = "1.7.2"
+VERSION = "1.8.0"
 
 # QQ 群视频走 highway 上传，实测超过约 50MB 会在上传中途失败（retcode 1200 / 102902），
 # 所以默认阈值取 50MB；真发失败时还会自动收紧并记住。
@@ -55,7 +57,8 @@ HELP_TEXT = (
     "也支持：/看 有兽焉 第12集、/看 有兽焉 12、/看 有兽焉第1-3话\n"
     "换成别的片子也行：/看 斗破苍穹第5话、/看 三体 08\n"
     "找文件：/找 关键词（不带话数就列出匹配的文件）\n"
-    "自检：/有兽焉自检"
+    "自检：/有兽焉自检\n"
+    "改配置：/有兽焉设置（仅管理员）"
 )
 
 UNCONFIGURED_TEXT = (
@@ -72,6 +75,22 @@ SITE_TEXT_TEMPLATE = (
 )
 
 _DIGIT_HINT = re.compile(r"\d|[零〇一二两三四五六七八九十百千]")
+
+# 改配置是管理操作：新版本用 ADMIN 过滤器，老版本没有就退化成不限制
+_ADMIN_PERMISSION = getattr(getattr(filter, "PermissionType", None), "ADMIN", None)
+_PERMISSION_DECORATOR = getattr(filter, "permission_type", None)
+
+
+def admin_only(func):
+    if _ADMIN_PERMISSION is None or _PERMISSION_DECORATOR is None:
+        return func
+    try:
+        return _PERMISSION_DECORATOR(_ADMIN_PERMISSION)(func)
+    except Exception:  # noqa: BLE001 - 装饰失败也不该让插件起不来
+        return func
+
+
+# 一次能改/重置的配置项别名（中文口语 → 配置键）在 settings.ALIASES 里维护
 
 
 def _duration(seconds: int) -> str:
@@ -329,6 +348,109 @@ class YoushouyanPlugin(Star):
 
         async for item in self._search_reply(event, keyword):
             yield item
+
+    # ------------------------------------------------------------ 配置管理
+
+    @filter.command(
+        "有兽焉设置",
+        alias={"有兽焉配置", "有兽焉设置项", "ysy设置", "ysy配置"},
+    )
+    @admin_only
+    async def config_command(self, event: AstrMessageEvent) -> AsyncGenerator:
+        """/有兽焉设置 —— 在聊天里查看/修改插件配置（仅管理员）。"""
+        body = settings.strip_command(self._raw_text(event))
+        if not body:
+            yield event.plain_result(settings.render_all(self.config))
+            return
+
+        parts = body.split(None, 1)
+        head = parts[0].strip()
+        value_text = parts[1].strip() if len(parts) > 1 else ""
+
+        if head in ("全部重置", "重置全部", "resetall"):
+            if value_text not in ("确认", "确定", "confirm", "yes"):
+                yield event.plain_result(
+                    "⚠️ 全部重置会连接口地址、密钥、目录密码一起恢复默认。\n"
+                    "确认真要这么做，发：/有兽焉设置 全部重置 确认"
+                )
+                return
+            async for item in self._reset_all(event):
+                yield item
+            return
+
+        key = settings.resolve(head)
+        if key is None:
+            yield event.plain_result(
+                f"❌ 没有「{head}」这个配置项\n"
+                "发 /有兽焉设置 查看全部配置项；常用名字：\n"
+                "接口 / 密钥 / 片名 / 来源 / 密码 / 上限 / 发送方式 / 站点"
+            )
+            return
+
+        if not value_text:
+            yield event.plain_result(settings.describe(key, self.config))
+            return
+
+        try:
+            value, notes = settings.parse_value(key, value_text)
+        except settings.ConfigError as exc:
+            yield event.plain_result(
+                f"❌ {exc}\n\n{settings.describe(key, self.config)}"
+            )
+            return
+
+        old = settings.mask(key, settings.value_of(self.config, key))
+        self.config[key] = value
+        # 改了配置，列表缓存/直链缓存都要失效，否则还会拿旧密钥、旧来源的结果
+        self.api.clear_cache()
+        if key == "max_send_size_mb":
+            self._upload_limit_mb = None  # 上限改了，忘掉之前学到的收紧值
+
+        lines = [f"✅ 已修改 {key}", f"· {old} → {settings.mask(key, value)}"]
+        for note in notes:
+            lines.append(f"· {note}")
+        lines.append(settings.save_config(self.config))
+
+        if key == "max_send_size_mb":
+            lines.append("· 顺手清掉了「上传失败后自动收紧」的上限")
+
+        # 改了接口/密钥就顺手验一次，省得等到有人追番才发现填错
+        if key in ("api_key", "api_base_url"):
+            try:
+                data = await self.api.check_key()
+                info = data.get("key") if isinstance(data.get("key"), dict) else {}
+                lines.append(
+                    f"🔎 连通性：正常（密钥「{info.get('name') or '-'}」，"
+                    f"作用域 {info.get('scopes') or '-'}）"
+                )
+            except ApiError as exc:
+                lines.append(f"🔎 连通性：失败（{exc}）")
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"🔎 连通性：失败（{exc}）")
+
+        yield event.plain_result("\n".join(lines))
+
+    async def _reset_all(self, event: AstrMessageEvent) -> AsyncGenerator:
+        """把所有配置恢复默认值。"""
+        changed: List[str] = []
+        for key in settings.keys():
+            default = settings.default_of(key)
+            if settings.value_of(self.config, key) != default:
+                self.config[key] = default
+                changed.append(key)
+        self.api.clear_cache()
+        self._upload_limit_mb = None
+
+        if not changed:
+            yield event.plain_result("✅ 所有配置本来就是默认值，没动它")
+            return
+
+        shown = "、".join(changed[:8]) + ("…" if len(changed) > 8 else "")
+        yield event.plain_result(
+            f"♻️ 已把 {len(changed)} 项恢复默认：{shown}\n"
+            f"{settings.save_config(self.config)}\n"
+            "⚠️ 接口地址/密钥也回到默认了，如果之前手填过，记得重新设置"
+        )
 
     # ------------------------------------------------------------ 取片与搜索
 

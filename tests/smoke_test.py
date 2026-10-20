@@ -720,6 +720,123 @@ async def main() -> int:
         print(f"  ✗ upload_mode=link 仍在上传：{_show(event)[:80]}")
         failed += 1
 
+    print("\n== 命令改配置 ==")
+
+    class SaveableConfig(dict):
+        """模拟 AstrBotConfig：dict + save_config() 落盘。"""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.saves = 0
+
+        def save_config(self, *args, **kwargs):
+            self.saves += 1
+
+    sconf = SaveableConfig(
+        {
+            "api_base_url": f"http://127.0.0.1:{port}/api/media.php",
+            "api_key": VALID_KEY,
+            "keyword": "有兽焉",
+            "source": "own",
+            "max_send_size_mb": 200,
+        }
+    )
+    setter = plugin_main.YoushouyanPlugin(context=None, config=sconf)
+
+    event = FakeEvent("/有兽焉设置")
+    async for _ in setter.config_command(event):
+        pass
+    out = _show(event)
+    if "api_key" in out and "••••" in out and VALID_KEY not in out:
+        print("  ✓ /有兽焉设置 列出全部配置，密钥打码")
+    else:
+        print(f"  ✗ 列配置不对：{out[:120]}")
+        failed += 1
+
+    event = FakeEvent("/有兽焉设置 上限 80")
+    async for _ in setter.config_command(event):
+        pass
+    out = _show(event)
+    if sconf.get("max_send_size_mb") == 80 and "已修改" in out and sconf.saves == 1:
+        print(f"  ✓ 中文别名改数值：max_send_size_mb=80，已落盘")
+    else:
+        print(f"  ✗ 改数值失败：{sconf.get('max_send_size_mb')} saves={sconf.saves} {out[:80]}")
+        failed += 1
+
+    event = FakeEvent("/有兽焉设置 来源 公共")
+    async for _ in setter.config_command(event):
+        pass
+    if sconf.get("source") == "public" and setter.api.source == "public":
+        print("  ✓ 枚举认中文：「来源 公共」→ source=public")
+    else:
+        print(f"  ✗ 枚举没转换：{sconf.get('source')}")
+        failed += 1
+
+    event = FakeEvent("/有兽焉设置 上限 abc")
+    async for _ in setter.config_command(event):
+        pass
+    out = _show(event)
+    if sconf.get("max_send_size_mb") == 80 and "整数" in out:
+        print("  ✓ 非法值被拒且不写坏配置")
+    else:
+        print(f"  ✗ 非法值没拦住：{sconf.get('max_send_size_mb')} {out[:80]}")
+        failed += 1
+
+    event = FakeEvent("/有兽焉设置 上限 默认")
+    async for _ in setter.config_command(event):
+        pass
+    if sconf.get("max_send_size_mb") == 50:
+        print("  ✓ 「默认」还原成 schema 默认值 50")
+    else:
+        print(f"  ✗ 没还原：{sconf.get('max_send_size_mb')}")
+        failed += 1
+
+    event = FakeEvent("/有兽焉设置 附加请求头 {\"Referer\": \"https://x.test\"}")
+    async for _ in setter.config_command(event):
+        pass
+    if isinstance(sconf.get("extra_headers"), dict) and sconf["extra_headers"].get("Referer"):
+        print("  ✓ JSON 字段（额外请求头）能改")
+    else:
+        print(f"  ✗ JSON 字段没写入：{sconf.get('extra_headers')}")
+        failed += 1
+
+    event = FakeEvent("/有兽焉设置 乱七八糟 xyz")
+    async for _ in setter.config_command(event):
+        pass
+    if "没有" in _show(event):
+        print("  ✓ 未知配置项给出提示")
+    else:
+        print(f"  ✗ 未知项没提示：{_show(event)[:80]}")
+        failed += 1
+
+    event = FakeEvent("/有兽焉设置 密钥 " + VALID_KEY)
+    async for _ in setter.config_command(event):
+        pass
+    out = _show(event)
+    if "连通性：正常" in out:
+        print("  ✓ 改密钥后自动验一次接口连通性")
+    else:
+        print(f"  ✗ 改密钥没验连通性：{out[:120]}")
+        failed += 1
+
+    event = FakeEvent("/有兽焉设置 全部重置")
+    async for _ in setter.config_command(event):
+        pass
+    if sconf.get("api_key") == VALID_KEY and "确认" in _show(event):
+        print("  ✓ 全部重置要先确认，没确认不动配置")
+    else:
+        print(f"  ✗ 没确认就重置了：{sconf.get('api_key')}")
+        failed += 1
+
+    event = FakeEvent("/有兽焉设置 全部重置 确认")
+    async for _ in setter.config_command(event):
+        pass
+    if sconf.get("api_key") == "" and sconf.get("max_send_size_mb") == 50:
+        print("  ✓ 确认后全部恢复默认")
+    else:
+        print(f"  ✗ 全部重置没生效：{sconf.get('api_key')!r}")
+        failed += 1
+
     print("\n== 异常分支 ==")
     bad_key = plugin_main.YoushouyanPlugin(
         context=None, config={**config, "api_key": "pk_" + "b" * 48}
