@@ -141,6 +141,7 @@ GROUPS: List[Tuple[str, List[str]]] = [
             "play_ttl",
             "page_size",
             "max_pages",
+            "max_folders",
             "cache_ttl",
             "max_episode",
             "search_limit",

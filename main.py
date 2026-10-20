@@ -43,7 +43,7 @@ except ImportError:  # 某些加载器以单文件方式导入
     )
 
 PLUGIN_NAME = "astrbot_plugin_youshouyan"
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 
 # QQ 群视频走 highway 上传，实测超过约 50MB 会在上传中途失败（retcode 1200 / 102902），
 # 所以默认阈值取 50MB；真发失败时还会自动收紧并记住。
@@ -637,17 +637,24 @@ class YoushouyanPlugin(Star):
             mark = " ← 当前" if source == self.api.source else ""
             lines.append(f"· {label}：{count} 个视频{mark}")
 
-        # 公共网盘扫描的细枝末节：锁着的目录、读失败的目录
+        # 公共网盘扫描的细枝末节：扫了多少目录、锁着的目录、读失败的目录
         report = self.api.scan_report or {}
         locked = int(report.get("locked_count") or 0)
         failed_folders = int(report.get("failed_count") or 0)
+        scanned = int(report.get("folders") or 0)
+        folder_limit = max(1, self._int_conf("max_folders", 50))
+        if scanned:
+            capped = scanned >= folder_limit
+            suffix = "（已到上限，剩下的目录没扫到 → 调大 max_folders）" if capped else ""
+            lines.append(f"· 扫描目录：{scanned} 个 / 上限 {folder_limit}{suffix}")
         if failed_folders:
             reason = str((report.get("failed") or ["接口异常"])[0])
             lines.append(f"   └ ⚠️ {failed_folders} 个目录读取失败：{reason}")
         if locked:
-            names = "、".join(str(n) for n in (report.get("locked") or [])[:3])
-            state = "密码可能不对" if passwords else "还没配密码"
+            names = "、".join(str(n) for n in (report.get("locked") or [])[:5])
+            state = "密码可能不对或没覆盖到" if passwords else "还没配密码"
             lines.append(f"   └ 🔒 {locked} 个带密码的目录（{names}）打不开，{state}")
+            lines.append("   └ 多个目录密码不同：全部填进「公共目录密码」，换行或逗号分隔")
 
         empty_labels = [
             label

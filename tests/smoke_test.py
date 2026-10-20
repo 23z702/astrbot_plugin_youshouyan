@@ -461,6 +461,11 @@ async def main() -> int:
     print(status_text)
     if "客厅电视" not in status_text or "永久" not in status_text:
         failed += 1
+    if "扫描目录：" in status_text and "上限" in status_text:
+        print("  ✓ 自检显示扫描目录数 / max_folders 上限")
+    else:
+        print(f"  ✗ 自检没显示扫描目录数：{status_text[-160:]}")
+        failed += 1
     if "站点：" in status_text and "注册/登录后即可上传" in status_text:
         print("  ✓ 自检为 0 时给出站点地址与注册指引")
     else:

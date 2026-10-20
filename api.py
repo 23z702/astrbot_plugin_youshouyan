@@ -666,7 +666,7 @@ class MediaAPI:
         failed: List[str] = []
 
         while queue and len(visited) < max_folders:
-            folder_id, inherited, folder_name = queue.pop(0)
+            folder_id, inherited, folder_path = queue.pop(0)
             if folder_id in visited:
                 continue
             visited.add(folder_id)
@@ -682,7 +682,8 @@ class MediaAPI:
                 continue
             data, password = first
             if not data:
-                locked.append(folder_name or f"id={folder_id}")
+                # 记完整路径，子目录里的锁目录也能一眼看出在哪一层
+                locked.append(folder_path or f"id={folder_id}")
                 continue  # 锁着且没有可用密码
 
             batch = data.get("list") or []
@@ -707,7 +708,7 @@ class MediaAPI:
             for raw in batch if isinstance(batch, list) else []:
                 if not isinstance(raw, dict):
                     continue
-                item = self._normalize_public_file(raw, password, folder_name)
+                item = self._normalize_public_file(raw, password, folder_path)
                 if not item:
                     continue
                 fingerprint = item.get("id")
@@ -724,7 +725,9 @@ class MediaAPI:
                 except (TypeError, ValueError):
                     sub_id = 0
                 if sub_id and sub_id not in visited:
-                    queue.append((sub_id, password, str(sub.get("name") or "")))
+                    sub_name = str(sub.get("name") or "")
+                    sub_path = f"{folder_path}/{sub_name}" if folder_path else sub_name
+                    queue.append((sub_id, password, sub_path))
 
         # 一个都没扫到（尤其是接口报错）时不留缓存，免得「检测失败」被缓存粘住
         if videos or not failed:
@@ -748,9 +751,13 @@ class MediaAPI:
 
     @staticmethod
     def _normalize_public_file(
-        raw: Dict[str, Any], password: str, folder_name: str = ""
+        raw: Dict[str, Any], password: str, folder_path: str = ""
     ) -> Optional[Dict[str, Any]]:
-        """把 public.php 的列表项补成 media.php 那种字段，方便复用匹配逻辑。"""
+        """把 public.php 的列表项补成 media.php 那种字段，方便复用匹配逻辑。
+
+        folder_path 是该文件所在目录的完整路径（如「有兽焉/第二季」），
+        既用于关键词匹配，也让「哪些目录没打开」的提示能定位到具体层级。
+        """
         name = str(raw.get("filename") or "")
         ext = os.path.splitext(name)[1].lstrip(".").lower()
         file_type = str(raw.get("file_type") or ext).lower()
@@ -765,7 +772,7 @@ class MediaAPI:
             item["size"] = 0
         item["size_text"] = str(raw.get("file_size_text") or "")
         item["_password"] = password
-        item["_folder"] = folder_name
+        item["_folder"] = folder_path
         return item
 
     async def public_play_url(self, video: Dict[str, Any]) -> EpisodeResult:

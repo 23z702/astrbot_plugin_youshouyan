@@ -2,7 +2,7 @@ name: astrbot_plugin_youshouyan
 display_name: 有兽焉追番
 desc: 发送 /看 有兽焉第X话，从媒体接口取回剧集限时直链并发送
 short_desc: 一句话追《有兽焉》
-version: v1.8.0
+version: v1.8.1
 author: bixie
 repo: https://github.com/23z702/astrbot_plugin_youshouyan
 astrbot_version: ">=3.5.0"
